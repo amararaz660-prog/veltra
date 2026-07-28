@@ -9,8 +9,11 @@ import math
 import datetime
 import re
 import asyncio
-import psycopg2
-import psycopg2.extras
+try:
+    import psycopg2
+    import psycopg2.extras
+except ImportError:
+    psycopg2 = None
 import aiohttp
 import concurrent.futures as _cf
 import html as html_module
