@@ -9578,7 +9578,13 @@ async def afk(ctx, *, reason: str = "AFK"):
     afk_cooldowns[key] = now
     save_afk()
 
-    await ctx.send(f"✅ {ctx.author.mention} : You are now AFK - {reason}")
+    # Use custom go_text template if the admin set one with !editafk, else default
+    go_text = afk_go_text_map.get(str(ctx.guild.id), "").strip()
+    if go_text:
+        afk_msg = go_text.replace("{user}", ctx.author.mention).replace("{reason}", reason)
+    else:
+        afk_msg = f"✅ {ctx.author.mention} : You are now AFK - {reason}"
+    await ctx.send(afk_msg)
 
 
 @bot.command(name="afklist")
