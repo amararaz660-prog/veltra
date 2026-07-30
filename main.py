@@ -786,12 +786,6 @@ def _find_banned_word(content: str, banned_words) -> str | None:
     if match:
         return match.group(1)
 
-    # Fallback: catch words split up with spaces/punctuation (e.g. "b a d word").
-    stripped = re.sub(r"[\s\W]+", "", content_lower)
-    for w in words:
-        w_stripped = re.sub(r"[\s\W]+", "", w.lower())
-        if w_stripped and w_stripped in stripped:
-            return w
     return None
 
 
@@ -2679,7 +2673,16 @@ async def on_message(message):
     if message.guild and anti_link_guilds.get(str(message.guild.id)):
         scoped_link_channels = antilink_channels_map.get(str(message.guild.id), set())
         in_link_scope = (not scoped_link_channels) or (message.channel.id in scoped_link_channels)
-        has_link = in_link_scope and bool(re.search(r'https?://|discord[.]gg/|www[.]', message.content, re.IGNORECASE))
+        # Only block Discord server invite links; ignore sticker-only messages
+        has_link = (
+            in_link_scope
+            and not message.stickers
+            and bool(re.search(
+                r'(discord[.]gg/|discord[.]com/invite/|discordapp[.]com/invite/)',
+                message.content,
+                re.IGNORECASE
+            ))
+        )
         if has_link:
             has_exempt = any(
                 r.permissions.manage_messages or r.permissions.administrator
@@ -2753,11 +2756,16 @@ async def on_message(message):
                 if _ce in _banned_emojis:
                     _found_emoji = _ce
                     break
-            # Unicode emoji / character check
+            # Unicode emoji / character check — substring match so it catches
+            # emojis anywhere in a sentence AND handles multi-codepoint emojis
+            # (e.g. skin-tone variants) that char-by-char iteration misses.
             if not _found_emoji:
-                for _char in _content:
-                    if _char in _banned_emojis:
-                        _found_emoji = _char
+                for _e in _banned_emojis:
+                    # Skip custom Discord emojis (<:name:id>) — already handled above
+                    if re.match(r'<a?:[^:]+:\d+>', _e):
+                        continue
+                    if _e and _e in _content:
+                        _found_emoji = _e
                         break
             if _found_emoji:
                 _ae_exempt = any(
@@ -2829,18 +2837,9 @@ async def on_message(message):
                 if not is_any_cmd:
                     try:
                         away = humanize_seconds(time.time() - data.get("since", time.time()))
-                        embed = discord.Embed(
-                            title="👋  Welcome Back!",
-                            color=discord.Color.from_rgb(87, 242, 135),
+                        await message.channel.send(
+                            f"👋 {message.author.mention}: Welcome back, you were last seen **{away}**"
                         )
-                        embed.set_author(name=message.author.display_name, icon_url=message.author.display_avatar.url)
-                        embed.add_field(name="⏱️ You were away for", value=f"**{away}**", inline=True)
-                        if data.get("reason") and data["reason"] != "AFK":
-                            embed.add_field(name="📝 Your reason was", value=f"*{data['reason']}*", inline=True)
-                        if data.get("image_url"):
-                            embed.set_thumbnail(url=data["image_url"])
-                        embed.set_footer(text="Glad to have you back!")
-                        await message.channel.send(embed=embed)
                     except discord.Forbidden:
                         pass
 
@@ -2885,6 +2884,36 @@ async def on_message(message):
                     await message.channel.send(embed=embed)
                 except discord.Forbidden:
                     pass
+
+    # --- ANTI-SPAM ---
+    if message.guild and not message.author.bot:
+        _as_gid = str(message.guild.id)
+        if antispam_enabled.get(_as_gid):
+            _as_key  = (message.guild.id, message.author.id)
+            _as_text = message.content.strip()
+            _as_now  = time.time()
+            if _as_text:
+                _as_prev = _spam_tracker.get(_as_key, {"last_msg": "", "count": 0, "last_time": 0.0})
+                if _as_text == _as_prev["last_msg"] and (_as_now - _as_prev["last_time"]) < 8:
+                    # Same exact message repeated — timeout immediately
+                    _spam_tracker[_as_key] = {"last_msg": _as_text, "count": 0, "last_time": _as_now}
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass
+                    _as_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=1)
+                    try:
+                        await message.author.timeout(_as_until, reason="Anti-spam: repeated identical message")
+                        await message.channel.send(
+                            f"🔇 {message.author.mention} کاتی بێدەنگی بۆ **1 خولەک** بەهۆی تکراری پەیام.\n"
+                            "Timed out for **1 minute** for spamming the same message.",
+                            delete_after=10,
+                        )
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+                    return
+                else:
+                    _spam_tracker[_as_key] = {"last_msg": _as_text, "count": 1, "last_time": _as_now}
 
     # --- WORD FILTER ---
     if "shit" in message.content.lower():
@@ -3662,7 +3691,32 @@ async def on_message_edit(before, after):
 
 @bot.event
 async def on_member_ban(guild, user):
-    if not log_channels.get(str(guild.id)):
+    gid = str(guild.id)
+    # ── Anti-nuke hook ────────────────────────────────────────────────────────
+    if antinuke_enabled.get(gid):
+        try:
+            entry = await guild.audit_logs(
+                action=discord.AuditLogAction.ban, limit=1
+            ).__anext__()
+            if entry.target.id == user.id and (time.time() - entry.created_at.timestamp()) < 5:
+                culprit = entry.user
+                if culprit and not culprit.bot and culprit.id != guild.owner_id:
+                    culprit_member = guild.get_member(culprit.id)
+                    if culprit_member and _antinuke_is_safe(guild, culprit_member):
+                        pass  # protected role — skip
+                    elif _antinuke_record(guild.id, culprit.id):
+                        try:
+                            await guild.ban(culprit, reason="[Anti-Nuke] Mass ban detected")
+                            if guild.system_channel:
+                                await guild.system_channel.send(
+                                    f"🛡️ **Anti-Nuke triggered!** {culprit.mention} was banned for mass banning.",
+                                    delete_after=30,
+                                )
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    if not log_channels.get(gid):
         return
     e = discord.Embed(
         color=0xED4245,
@@ -3814,6 +3868,30 @@ async def on_guild_channel_create(channel):
 @bot.event
 async def on_guild_channel_delete(channel):
     gid = str(channel.guild.id)
+    # ── Anti-nuke hook ────────────────────────────────────────────────────────
+    if antinuke_enabled.get(gid):
+        try:
+            entry = await channel.guild.audit_logs(
+                action=discord.AuditLogAction.channel_delete, limit=1
+            ).__anext__()
+            if (time.time() - entry.created_at.timestamp()) < 5:
+                culprit = entry.user
+                if culprit and not culprit.bot and culprit.id != channel.guild.owner_id:
+                    culprit_member = channel.guild.get_member(culprit.id)
+                    if culprit_member and _antinuke_is_safe(channel.guild, culprit_member):
+                        pass  # protected role — skip
+                    elif _antinuke_record(channel.guild.id, culprit.id):
+                        try:
+                            await channel.guild.ban(culprit, reason="[Anti-Nuke] Mass channel deletion detected")
+                            if channel.guild.system_channel:
+                                await channel.guild.system_channel.send(
+                                    f"🛡️ **Anti-Nuke triggered!** {culprit.mention} was banned for mass channel deletion.",
+                                    delete_after=30,
+                                )
+                        except Exception:
+                            pass
+        except Exception:
+            pass
     if not log_channels.get(gid):
         return
     e = discord.Embed(
@@ -6594,6 +6672,43 @@ async def avatar(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 
+@bot.command(name="addemoji", aliases=["stealemoji", "emojiadd"])
+@commands.has_permissions(manage_emojis=True)
+async def addemoji_cmd(ctx, emoji_str: str, name: str = None):
+    """Steal a custom emoji from another server and add it here."""
+    match = re.match(r"<(a)?:([^:]+):(\d+)>", emoji_str)
+    if not match:
+        return await ctx.send(
+            "❌ Please mention a custom emoji from another server.\n"
+            "Usage: `!addemoji :emoji: [optional_new_name]`",
+            delete_after=10,
+        )
+    animated   = bool(match.group(1))
+    emoji_name = (name or match.group(2))[:32]
+    emoji_id   = int(match.group(3))
+    ext        = "gif" if animated else "png"
+    url        = f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return await ctx.send("❌ Could not download that emoji. Is it from a valid server?", delete_after=10)
+                image_data = await resp.read()
+        new_emoji = await ctx.guild.create_custom_emoji(name=emoji_name, image=image_data)
+        await ctx.send(f"✅ Added emoji {new_emoji} → `:{new_emoji.name}:`")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to add emojis (need Manage Emojis).", delete_after=10)
+    except discord.HTTPException as e:
+        await ctx.send(f"❌ Failed to add emoji: `{e}`", delete_after=10)
+
+@addemoji_cmd.error
+async def addemoji_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You need **Manage Emojis** permission.", delete_after=8)
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage: `!addemoji :emoji: [new_name]`", delete_after=8)
+
+
 async def _animequiz_runner(channel, char_name, image_url, msg):
     """Count down 15s updating footer only — name stays hidden until guessed."""
     try:
@@ -7003,52 +7118,74 @@ async def say_error(ctx, error):
         await ctx.send("Usage: $say <message> | بەکارهێنان: $say <پەیام>")
 
 @bot.command()
-@commands.has_permissions(kick_members=True)
-async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided | هیچ هۆکارێک نەدراوە"):
+@commands.has_permissions(administrator=True)
+async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     if member == ctx.author:
-        await ctx.send("You cannot kick yourself. | ناتوانیت خۆت لەدەربکەیت.")
-        return
+        return await ctx.send("❌ You cannot kick yourself.", delete_after=8)
     if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
-        await ctx.send("You cannot kick someone with an equal or higher role. | ناتوانیت کەسێک لەدەربکەیت کە رۆڵی یەکسان یان بەرزتر هەیە.")
-        return
+        return await ctx.send("❌ You cannot kick someone with an equal or higher role.", delete_after=8)
     try:
-        await member.kick(reason=reason)
-        await ctx.send(f"Kicked {member.mention}. Reason: {reason} | {member.mention} لەدەرکرا. هۆکار: {reason}")
+        await member.kick(reason=f"{reason} (by {ctx.author})")
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        embed = discord.Embed(
+            title="👢 Member Kicked",
+            color=discord.Color.orange(),
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed.add_field(name="Member", value=f"{member.mention} (`{member.id}`)", inline=False)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=True)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await ctx.send(embed=embed, delete_after=30)
     except discord.Forbidden:
-        await ctx.send("I don't have permission to kick that member. | مووچەم نییە ئەم ئەندامە لەدەربکەم.")
+        await ctx.send("❌ I don't have permission to kick that member.", delete_after=8)
 
 @kick.error
 async def kick_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the Kick Members permission. | مووچەی لەدەرکردنی ئەندامان پێویستە.")
+        await ctx.send("❌ Only administrators can use this command.", delete_after=8)
     elif isinstance(error, commands.MemberNotFound):
-        await ctx.send("Member not found. | ئەندام نەدۆزرایەوە.")
+        await ctx.send("❌ Member not found.", delete_after=8)
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("Usage: $kick @member [reason] | بەکارهێنان: $kick @ئەندام [هۆکار]")
+        await ctx.send("Usage: `!kick @member [reason]`", delete_after=8)
 
 @bot.command()
-@commands.has_permissions(ban_members=True)
-async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided | هیچ هۆکارێک نەدراوە"):
+@commands.has_permissions(administrator=True)
+async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     if member == ctx.author:
-        await ctx.send("You cannot ban yourself. | ناتوانیت خۆت بلۆک بکەیت.")
-        return
+        return await ctx.send("❌ You cannot ban yourself.", delete_after=8)
     if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
-        await ctx.send("You cannot ban someone with an equal or higher role. | ناتوانیت کەسێک بلۆک بکەیت کە رۆڵی یەکسان یان بەرزتر هەیە.")
-        return
+        return await ctx.send("❌ You cannot ban someone with an equal or higher role.", delete_after=8)
     try:
-        await member.ban(reason=reason, delete_message_days=0)
-        await ctx.send(f"Banned {member.mention}. Reason: {reason} | {member.mention} بلۆک کرا. هۆکار: {reason}")
+        await member.ban(reason=f"{reason} (by {ctx.author})", delete_message_days=0)
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        embed = discord.Embed(
+            title="🔨 Member Banned",
+            color=discord.Color.red(),
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed.add_field(name="Member", value=f"{member.mention} (`{member.id}`)", inline=False)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=True)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await ctx.send(embed=embed, delete_after=30)
     except discord.Forbidden:
-        await ctx.send("I don't have permission to ban that member. | مووچەم نییە ئەم ئەندامە بلۆک بکەم.")
+        await ctx.send("❌ I don't have permission to ban that member.", delete_after=8)
 
 @ban.error
 async def ban_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the Ban Members permission. | مووچەی بلۆک کردنی ئەندامان پێویستە.")
+        await ctx.send("❌ Only administrators can use this command.", delete_after=8)
     elif isinstance(error, commands.MemberNotFound):
-        await ctx.send("Member not found. | ئەندام نەدۆزرایەوە.")
+        await ctx.send("❌ Member not found.", delete_after=8)
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("Usage: $ban @member [reason] | بەکارهێنان: $ban @ئەندام [هۆکار]")
+        await ctx.send("Usage: `!ban @member [reason]`", delete_after=8)
 
 @bot.command()
 @commands.has_permissions(ban_members=True)
@@ -9133,14 +9270,180 @@ async def showchannel(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
     await ctx.send("👀 Channel visible. | کەناڵ بەرچاوە.")
 
-@bot.command()
-@commands.has_permissions(manage_channels=True)
-async def nuke(ctx):
-    pos = ctx.channel.position
-    new_ch = await ctx.channel.clone(reason=f"Nuked by | نوکەکرا لەلایەن {ctx.author}")
-    await new_ch.edit(position=pos)
-    await ctx.channel.delete()
-    await new_ch.send(f"💥 Channel nuked by | کەناڵ نوکەکرا لەلایەن {ctx.author.mention}!")
+# --- ANTI-NUKE SYSTEM ---
+antinuke_enabled    = {}   # {guild_id_str: bool}
+antinuke_safe_roles = {}   # {guild_id_str: set of role_id ints — exempt from anti-nuke ban}
+_antinuke_actions   = {}   # {guild_id_str: {user_id_str: [timestamps]}}
+ANTINUKE_THRESHOLD  = 3    # destructive actions within window before triggering
+ANTINUKE_WINDOW     = 10   # seconds
+
+# --- ANTI-SPAM globals ---
+antispam_enabled = {}  # {guild_id_str: bool}
+_spam_tracker    = {}  # {(guild_id, user_id): {last_msg, count, last_time}}
+
+def _antinuke_record(guild_id: int, user_id: int) -> bool:
+    """Record a destructive action. Returns True if threshold exceeded."""
+    gid, uid = str(guild_id), str(user_id)
+    if not antinuke_enabled.get(gid):
+        return False
+    now = time.time()
+    buckets = _antinuke_actions.setdefault(gid, {})
+    stamps  = [t for t in buckets.get(uid, []) if now - t < ANTINUKE_WINDOW]
+    stamps.append(now)
+    buckets[uid] = stamps
+    return len(stamps) >= ANTINUKE_THRESHOLD
+
+def _antinuke_is_safe(guild: discord.Guild, member) -> bool:
+    """Return True if the member holds any safe role and should be skipped."""
+    safe = antinuke_safe_roles.get(str(guild.id), set())
+    if not safe:
+        return False
+    member_role_ids = {r.id for r in getattr(member, "roles", [])}
+    return bool(safe & member_role_ids)
+
+@bot.command(name="antinuke")
+@commands.has_permissions(administrator=True)
+async def antinuke_cmd(ctx, mode: str = "on", *, target: str = ""):
+    """
+    !antinuke on/off
+    !antinuke saferole add @role
+    !antinuke saferole remove @role
+    !antinuke saferole list
+    """
+    if ctx.guild is None:
+        return await ctx.send("Server only.")
+
+    gid  = str(ctx.guild.id)
+    mode = mode.lower()
+
+    # ── safe-role sub-commands ─────────────────────────────────────────────
+    if mode == "saferole":
+        sub = target.strip().split(None, 1)
+        action = sub[0].lower() if sub else "list"
+
+        if action == "list":
+            safe = antinuke_safe_roles.get(gid, set())
+            if not safe:
+                desc = "ئێستا هیچ رۆڵێکی سەیف نییە.\nNo safe roles set yet.\n\n`!antinuke saferole add @role`"
+            else:
+                lines = []
+                for rid in safe:
+                    role = ctx.guild.get_role(rid)
+                    lines.append(f"• {role.mention if role else f'`{rid}` (deleted)'}")
+                desc = "\n".join(lines)
+            embed = discord.Embed(
+                title="🛡️ Anti-Nuke — Safe Roles",
+                description=desc,
+                color=0x5865F2,
+            )
+            return await ctx.send(embed=embed)
+
+        if action in ("add", "remove"):
+            if not ctx.message.role_mentions:
+                return await ctx.send(
+                    f"❌ Usage: `!antinuke saferole {action} @role`", delete_after=8
+                )
+            safe = antinuke_safe_roles.setdefault(gid, set())
+            changed = []
+            for role in ctx.message.role_mentions:
+                if action == "add":
+                    safe.add(role.id)
+                    changed.append(f"✅ {role.mention} added as safe role")
+                else:
+                    safe.discard(role.id)
+                    changed.append(f"🗑️ {role.mention} removed from safe roles")
+            embed = discord.Embed(
+                title="🛡️ Anti-Nuke — Safe Roles Updated",
+                description="\n".join(changed),
+                color=discord.Color.green() if action == "add" else discord.Color.orange(),
+            )
+            embed.set_footer(text="Members with these roles will never be banned by anti-nuke.")
+            return await ctx.send(embed=embed)
+
+        return await ctx.send(
+            "Usage: `!antinuke saferole add @role` / `remove @role` / `list`", delete_after=8
+        )
+
+    # ── on / off ───────────────────────────────────────────────────────────
+    if mode in ("on", "enable", "true", "1"):
+        antinuke_enabled[gid] = True
+        safe_count = len(antinuke_safe_roles.get(gid, set()))
+        embed = discord.Embed(
+            title="🛡️ Anti-Nuke Enabled",
+            description=(
+                "ئانتی-نووک چالاک کرا.\n"
+                "هەر کەسێک لە ماوەی ١٠ چرکەدا ٣ یان زیاتر کەناڵ/رۆڵ بسڕێتەوە یان ئەندام بلۆک بکات "
+                "دەبێتە بەندکراوی ئۆتۆماتیکی.\n\n"
+                "Anti-nuke is now **ON**. Any user who performs 3+ destructive actions "
+                "(channel/role deletion, mass ban) within 10 seconds will be auto-banned.\n\n"
+                f"🔒 Safe roles: **{safe_count}** — use `!antinuke saferole add @role` to protect roles."
+            ),
+            color=discord.Color.green(),
+        )
+    elif mode in ("off", "disable", "false", "0"):
+        antinuke_enabled[gid] = False
+        embed = discord.Embed(
+            title="🛡️ Anti-Nuke Disabled",
+            description="ئانتی-نووک ناچالاک کرا. | Anti-nuke turned **OFF**.",
+            color=discord.Color.red(),
+        )
+    else:
+        embed = discord.Embed(
+            title="🛡️ Anti-Nuke — Help",
+            description=(
+                "`!antinuke on` — enable\n"
+                "`!antinuke off` — disable\n"
+                "`!antinuke saferole add @role` — protect a role from being banned\n"
+                "`!antinuke saferole remove @role` — remove protection\n"
+                "`!antinuke saferole list` — view protected roles"
+            ),
+            color=0x5865F2,
+        )
+    await ctx.send(embed=embed)
+
+@antinuke_cmd.error
+async def antinuke_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Only administrators can use this command.", delete_after=8)
+
+
+@bot.command(name="antispam")
+@commands.has_permissions(administrator=True)
+async def antispam_cmd(ctx, mode: str = "on"):
+    """Enable or disable the anti-spam system for this server."""
+    gid  = str(ctx.guild.id)
+    mode = mode.lower()
+    if mode in ("on", "enable", "true", "1"):
+        antispam_enabled[gid] = True
+        embed = discord.Embed(
+            title="🔇 Anti-Spam Enabled",
+            description=(
+                "ئانتی-سپام چالاک کرا.\n"
+                "هەر کەسێک هەمان پەیامی تەکرار بکات لە کاتی کورتدا **1 خولەک** بێدەنگ دەکرێت.\n\n"
+                "Anti-spam is now **ON**. Anyone who sends the exact same message twice "
+                "in a row will be timed out for **1 minute**."
+            ),
+            color=discord.Color.green(),
+        )
+    elif mode in ("off", "disable", "false", "0"):
+        antispam_enabled[gid] = False
+        embed = discord.Embed(
+            title="🔇 Anti-Spam Disabled",
+            description="ئانتی-سپام ناچالاک کرا. | Anti-spam turned **OFF**.",
+            color=discord.Color.red(),
+        )
+    else:
+        embed = discord.Embed(
+            description="Usage: `!antispam on` / `!antispam off`",
+            color=discord.Color.orange(),
+        )
+    await ctx.send(embed=embed)
+
+@antispam_cmd.error
+async def antispam_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Only administrators can use this command.", delete_after=8)
+
 
 # --- VOICE MANAGEMENT ---
 
@@ -9275,34 +9578,44 @@ async def afk(ctx, *, reason: str = "AFK"):
     afk_cooldowns[key] = now
     save_afk()
 
-    afk_moods = ["🌙", "😴", "💤", "🛌", "🎧", "🌌", "☕", "🔇"]
-    mood = random.choice(afk_moods)
+    await ctx.send(f"✅ {ctx.author.mention} : You are now AFK - {reason}")
 
-    gid_str = str(ctx.guild.id)
-    go_text_template = afk_go_text_map.get(gid_str, "").strip()
-    if go_text_template:
-        try:
-            description = go_text_template.format(user=ctx.author.mention, reason=reason)
-        except (KeyError, IndexError, ValueError):
-            description = go_text_template
-    else:
-        description = "{user} is now AFK. | {user} لە دۆخی AFK دایە.".format(user=ctx.author.mention)
+
+@bot.command(name="afklist")
+async def afklist_cmd(ctx):
+    """Show all AFK users in this server."""
+    if ctx.guild is None:
+        return await ctx.send("Server only.")
+
+    server_afk = [
+        (uid, data)
+        for (gid, uid), data in afk_users.items()
+        if gid == ctx.guild.id
+    ]
+
+    if not server_afk:
+        return await ctx.send("✅ هیچ کەسێک AFK نییە ئێستا. | No one is AFK right now.")
 
     embed = discord.Embed(
-        title=f"{mood}  Gone AFK | ڕوحستی",
-        description=description,
+        title=f"💤 AFK List — {ctx.guild.name}",
         color=discord.Color.from_rgb(88, 101, 242),
-        timestamp=datetime.datetime.utcfromtimestamp(afk_since)
+        timestamp=datetime.datetime.utcnow(),
     )
-    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
-    embed.add_field(name="📝 Reason | هۆکار", value=f"*{reason}*", inline=False)
-    embed.add_field(name="🕐 AFK Since | AFK لەکاتی", value=f"<t:{int(afk_since)}:R>", inline=True)
-    if image_url:
-        embed.set_image(url=image_url)
-    else:
-        embed.set_thumbnail(url=ctx.author.display_avatar.url)
-    embed.set_footer(text="Send any message to come back • Your nickname & status are updated")
+
+    for uid, data in sorted(server_afk, key=lambda x: x[1].get("since", 0)):
+        member = ctx.guild.get_member(uid)
+        name   = member.display_name if member else f"User {uid}"
+        away   = humanize_seconds(time.time() - data.get("since", time.time()))
+        reason = data.get("reason", "AFK")
+        embed.add_field(
+            name=f"💤 {name}",
+            value=f"**هۆکار | Reason:** {reason}\n**ماوە | Away:** {away}",
+            inline=False,
+        )
+
+    embed.set_footer(text=f"{len(server_afk)} AFK user(s)")
     await ctx.send(embed=embed)
+
 
 @bot.command(name="editafk")
 @commands.has_permissions(administrator=True)
@@ -12156,10 +12469,12 @@ class GiveawayModal(discord.ui.Modal, title="🎉 بەخشینی نوێ | New Gi
         placeholder="10m = 10 minutes · 2h = 2 hours · 1d = 1 day",
         max_length=10,
     )
-
-    def __init__(self, winner_count: int):
-        super().__init__()
-        self._winner_count = winner_count
+    winners_input = discord.ui.TextInput(
+        label="ژمارەی بەختەوار | Winners (1–10)",
+        placeholder="1",
+        max_length=2,
+        default="1",
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         seconds = parse_duration(self.duration_input.value.strip())
@@ -12168,8 +12483,12 @@ class GiveawayModal(discord.ui.Modal, title="🎉 بەخشینی نوێ | New Gi
                 "❌ ماوەی نادروست | Invalid duration. Use `10m`, `2h`, `1d` (min 10s).",
                 ephemeral=True,
             )
+        try:
+            winner_count = max(1, min(10, int(self.winners_input.value.strip() or "1")))
+        except ValueError:
+            winner_count = 1
         await interaction.response.send_message(
-            f"✅ بەخشینەکە دەستپێکرا! {self._winner_count} بەختەوار | Giveaway started! {self._winner_count} winner(s).",
+            f"✅ بەخشینەکە دەستپێکرا! {winner_count} بەختەوار | Giveaway started! {winner_count} winner(s).",
             ephemeral=True,
         )
         asyncio.create_task(
@@ -12177,7 +12496,7 @@ class GiveawayModal(discord.ui.Modal, title="🎉 بەخشینی نوێ | New Gi
                 interaction.channel,
                 self.prize.value.strip(),
                 interaction.user,
-                self._winner_count,
+                winner_count,
                 seconds,
             )
         )
@@ -12192,44 +12511,15 @@ class GiveawayModal(discord.ui.Modal, title="🎉 بەخشینی نوێ | New Gi
             pass
 
 
-class GiveawayWinnersSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label=f"{i} بەختەوار | Winner{'s' if i>1 else ''}", value=str(i), emoji="🏆")
-            for i in range(1, 11)
-        ]
-        super().__init__(
-            placeholder="🎯 ژمارەی بەختەوار هەڵبژێرە | Pick number of winners...",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=0,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        count = int(self.values[0])
-        self.view.winner_count = count
-        # Update the placeholder to show selection
-        self.placeholder = f"🏆 {count} بەختەوار | {count} winner(s) selected"
-        # Enable the start button
-        for item in self.view.children:
-            if hasattr(item, 'custom_id') and item.custom_id == "gw_start_btn":
-                item.disabled = False
-        await interaction.response.edit_message(view=self.view)
-
-
 class GiveawayCreateView(discord.ui.View):
     def __init__(self, author_id: int):
         super().__init__(timeout=120)
         self._author_id = author_id
-        self.winner_count = 1
-        self.add_item(GiveawayWinnersSelect())
 
     @discord.ui.button(
         label="🎉 دروستکردنی بەخشین | Create Giveaway",
         style=discord.ButtonStyle.success,
         custom_id="gw_start_btn",
-        row=1,
     )
     async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self._author_id:
@@ -12237,14 +12527,14 @@ class GiveawayCreateView(discord.ui.View):
                 "❌ تەنها ئەو کەسە دەتوانێت کلیک بکات | Only the command author can use this.",
                 ephemeral=True,
             )
-        await interaction.response.send_modal(GiveawayModal(self.winner_count))
+        await interaction.response.send_modal(GiveawayModal())
         self.stop()
 
 
 @bot.command(name="gcreate", aliases=["gstart"])
 @commands.has_permissions(manage_guild=True)
 async def gcreate_cmd(ctx):
-    """Start a giveaway using an interactive form."""
+    """Start a giveaway — one click then fill in the form."""
     if ctx.guild is None:
         return await ctx.send("Server only. | تەنها لە سێرڤەر.")
     try:
@@ -12255,12 +12545,8 @@ async def gcreate_cmd(ctx):
         color=0xFFD700,
         title="🎉 دروستکردنی بەخشین | Create a Giveaway",
         description=(
-            "**۱.** لە لیستی خوارەوە ژمارەی بەختەوار هەڵبژێرە.\n"
-            "**۲.** دەگمەی **Create Giveaway** دابگرە.\n"
-            "**۳.** خەڵات و ماوە پڕبکەرەوە.\n\n"
-            "**1.** Pick the number of winners from the list below.\n"
-            "**2.** Click **Create Giveaway**.\n"
-            "**3.** Fill in the prize and duration."
+            "دەگمەی خوارەوە دابگرە، خەڵات، ماوە و ژمارەی بەختەوار پڕبکەرەوە.\n\n"
+            "Click the button below, then fill in the prize, duration, and number of winners."
         ),
     )
     embed.set_footer(text=f"Requested by {ctx.author.display_name}")
@@ -17084,8 +17370,9 @@ async def commandshortcut_cmd(ctx, *, args: str = ""):
             f"`!{_full_raw}` فەرمانی ناسراو نییە."
         )
 
-    # Block overwriting an existing real command
-    if bot.get_command(_sc_raw) is not None:
+    # Block overwriting an existing real command (primary name only — aliases are fine to reuse)
+    _existing_cmd = bot.get_command(_sc_raw)
+    if _existing_cmd is not None and _existing_cmd.name == _sc_raw:
         return await ctx.send(
             f"❌ `!{_sc_raw}` is already a real bot command and cannot be used as a shortcut.\n"
             f"`!{_sc_raw}` پێشتر فەرمانی بۆتەکەیە، ناتوانرێت وەک کورتکراوە بەکاربهێنرێت."
@@ -17123,5 +17410,4 @@ async def commandshortcut_error(ctx, error):
 
 
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
- 
  
