@@ -3304,6 +3304,98 @@ async def on_message(message):
                 pass
         return
 
+    # --- GCREATE INTERACTIVE SESSION ---
+    if message.guild is not None and not message.author.bot and not message.content.startswith(bot.command_prefix):
+        _gs = _gcreate_sessions.get(message.channel.id)
+        if _gs and message.author.id == _gs["author_id"]:
+            _gs_text = message.content.strip()
+            if _gs_text.lower() == "cancel":
+                _gcreate_sessions.pop(message.channel.id, None)
+                try:
+                    await _gs["q_msg"].delete()
+                except Exception:
+                    pass
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                await message.channel.send("❌ Giveaway creation cancelled.", delete_after=5)
+                return
+            step = _gs["step"]
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            if step == 1:
+                _gs["prize"] = _gs_text
+                _gs["step"] = 2
+                try:
+                    await _gs["q_msg"].delete()
+                except Exception:
+                    pass
+                _embed2 = discord.Embed(
+                    color=0xFFD700,
+                    title="🎉 Create a Giveaway — Step 2/3",
+                    description=(
+                        f"**Prize:** {_gs_text}\n\n"
+                        "**How long should the giveaway last?**\n\n"
+                        "Examples: `10m` (10 minutes), `2h` (2 hours), `1d` (1 day)\n"
+                        "*(Type `cancel` to stop.)*"
+                    ),
+                )
+                _gs["q_msg"] = await message.channel.send(embed=_embed2)
+            elif step == 2:
+                _secs = parse_duration(_gs_text)
+                if _secs is None or _secs < 10:
+                    await message.channel.send(
+                        "❌ Invalid duration. Use `10m`, `2h`, `1d` (min 10 seconds). Try again.",
+                        delete_after=8,
+                    )
+                    return
+                _gs["duration"] = _secs
+                _gs["step"] = 3
+                try:
+                    await _gs["q_msg"].delete()
+                except Exception:
+                    pass
+                _embed3 = discord.Embed(
+                    color=0xFFD700,
+                    title="🎉 Create a Giveaway — Step 3/3",
+                    description=(
+                        f"**Prize:** {_gs['prize']}\n"
+                        f"**Duration:** {_gs_text}\n\n"
+                        "**How many winners? (1–10)**\n"
+                        "*(Type `cancel` to stop.)*"
+                    ),
+                )
+                _gs["q_msg"] = await message.channel.send(embed=_embed3)
+            elif step == 3:
+                try:
+                    _w_count = max(1, min(10, int(_gs_text)))
+                except ValueError:
+                    await message.channel.send("❌ Please enter a number between 1 and 10.", delete_after=8)
+                    return
+                _gcreate_sessions.pop(message.channel.id, None)
+                try:
+                    await _gs["q_msg"].delete()
+                except Exception:
+                    pass
+                confirm = discord.Embed(
+                    color=0x2ECC71,
+                    title="✅ Giveaway Launching!",
+                    description=(
+                        f"🎁 **Prize:** {_gs['prize']}\n"
+                        f"🏆 **Winners:** {_w_count}\n"
+                        f"⏰ **Duration:** {_gs_text}"
+                    ),
+                )
+                await message.channel.send(embed=confirm, delete_after=5)
+                asyncio.create_task(
+                    _launch_giveaway(message.channel, _gs["prize"], message.author, _w_count, _gs["duration"])
+                )
+            return
+
+
     # --- NO-PREFIX tmo / untmo / nick SHORTCUTS ---
     if message.guild is not None:
         _np  = message.content.strip()
@@ -3337,7 +3429,6 @@ async def on_message(message):
             # ── no args → show cool help embed ───────────────────────────────
             if _np_lower == "tmo":
                 if not _mod_perm():
-                    await bot.process_commands(message)
                     return
                 _e = discord.Embed(
                     title="⏱️ Command: timeout",
@@ -3497,6 +3588,161 @@ async def on_message(message):
             return
 
         # ════════════════════════════════════════════════════════════════════
+        # kick  — kick shortcut (no prefix)
+        # ════════════════════════════════════════════════════════════════════
+        def _kick_perm():
+            return (
+                message.channel.permissions_for(message.author).kick_members
+                or message.channel.permissions_for(message.author).administrator
+            )
+        def _ban_perm():
+            return (
+                message.channel.permissions_for(message.author).ban_members
+                or message.channel.permissions_for(message.author).administrator
+            )
+
+        if _np_lower == "kick" or _np_lower.startswith("kick "):
+            if _np_lower == "kick":
+                if not _kick_perm():
+                    return
+                _e = discord.Embed(
+                    title="👢 Command: kick",
+                    description="Kick a member from the server.\nThey can rejoin with a new invite.",
+                    color=0xE67E22,
+                )
+                _e.add_field(name="Aliases", value="`!kick`  `kick`", inline=False)
+                _e.add_field(
+                    name="Usage",
+                    value=(
+                        "`kick @member`\n"
+                        "`kick @member [reason]`\n\n"
+                        "`!kick @member [reason]`"
+                    ),
+                    inline=False,
+                )
+                _e.add_field(
+                    name="Examples",
+                    value=(
+                        "`kick @B50`\n"
+                        "`kick @B50 Breaking rules`"
+                    ),
+                    inline=False,
+                )
+                _e.set_footer(text="Requires: Kick Members permission")
+                await message.channel.send(embed=_e)
+                return
+
+            if not _kick_perm():
+                await message.channel.send("❌ You need **Kick Members** permission.")
+                return
+            _kparts = _np.split(None, 2)
+            _kick_member = _resolve_member(_kparts[1]) if len(_kparts) >= 2 else None
+            _kick_reason = _kparts[2] if len(_kparts) >= 3 else "No reason provided"
+            if _kick_member is None:
+                await message.channel.send(embed=discord.Embed(
+                    description="❌ Member not found — mention or ID required.\n`kick @member [reason]`",
+                    color=0xE74C3C,
+                ))
+                return
+            if _kick_member == message.author:
+                await message.channel.send("❌ You cannot kick yourself.")
+                return
+            if message.author != message.guild.owner and _kick_member.top_role >= message.author.top_role:
+                await message.channel.send("❌ You cannot kick someone with an equal or higher role.")
+                return
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            try:
+                await _kick_member.kick(reason=f"{_kick_reason} (by {message.author})")
+                _ok = discord.Embed(title="👢 Member Kicked", color=0xE67E22)
+                _ok.add_field(name="👤 Member", value=f"{_kick_member.mention} (`{_kick_member.id}`)", inline=False)
+                _ok.add_field(name="📋 Reason", value=_kick_reason, inline=True)
+                _ok.add_field(name="👮 Moderator", value=message.author.mention, inline=True)
+                _ok.set_thumbnail(url=_kick_member.display_avatar.url)
+                _ok.set_footer(text=f"Kicked by {message.author}", icon_url=message.author.display_avatar.url)
+                _ok.timestamp = discord.utils.utcnow()
+                await message.channel.send(embed=_ok)
+            except discord.Forbidden:
+                await message.channel.send("❌ I don't have permission to kick that member.")
+            except Exception as _e_kick:
+                await message.channel.send(f"❌ Error: {_e_kick}")
+            return
+
+        # ════════════════════════════════════════════════════════════════════
+        # ban  — ban shortcut (no prefix)
+        # ════════════════════════════════════════════════════════════════════
+        if _np_lower == "ban" or _np_lower.startswith("ban "):
+            if _np_lower == "ban":
+                if not _ban_perm():
+                    return
+                _e = discord.Embed(
+                    title="🔨 Command: ban",
+                    description="Permanently ban a member from the server.",
+                    color=0xE74C3C,
+                )
+                _e.add_field(name="Aliases", value="`!ban`  `ban`", inline=False)
+                _e.add_field(
+                    name="Usage",
+                    value=(
+                        "`ban @member`\n"
+                        "`ban @member [reason]`\n\n"
+                        "`!ban @member [reason]`"
+                    ),
+                    inline=False,
+                )
+                _e.add_field(
+                    name="Examples",
+                    value=(
+                        "`ban @B50`\n"
+                        "`ban @B50 Repeated rule breaking`"
+                    ),
+                    inline=False,
+                )
+                _e.set_footer(text="Requires: Ban Members permission")
+                await message.channel.send(embed=_e)
+                return
+
+            if not _ban_perm():
+                await message.channel.send("❌ You need **Ban Members** permission.")
+                return
+            _bparts = _np.split(None, 2)
+            _ban_member = _resolve_member(_bparts[1]) if len(_bparts) >= 2 else None
+            _ban_reason = _bparts[2] if len(_bparts) >= 3 else "No reason provided"
+            if _ban_member is None:
+                await message.channel.send(embed=discord.Embed(
+                    description="❌ Member not found — mention or ID required.\n`ban @member [reason]`",
+                    color=0xE74C3C,
+                ))
+                return
+            if _ban_member == message.author:
+                await message.channel.send("❌ You cannot ban yourself.")
+                return
+            if message.author != message.guild.owner and _ban_member.top_role >= message.author.top_role:
+                await message.channel.send("❌ You cannot ban someone with an equal or higher role.")
+                return
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            try:
+                await _ban_member.ban(reason=f"{_ban_reason} (by {message.author})", delete_message_days=0)
+                _ok = discord.Embed(title="🔨 Member Banned", color=0xE74C3C)
+                _ok.add_field(name="👤 Member", value=f"{_ban_member.mention} (`{_ban_member.id}`)", inline=False)
+                _ok.add_field(name="📋 Reason", value=_ban_reason, inline=True)
+                _ok.add_field(name="👮 Moderator", value=message.author.mention, inline=True)
+                _ok.set_thumbnail(url=_ban_member.display_avatar.url)
+                _ok.set_footer(text=f"Banned by {message.author}", icon_url=message.author.display_avatar.url)
+                _ok.timestamp = discord.utils.utcnow()
+                await message.channel.send(embed=_ok)
+            except discord.Forbidden:
+                await message.channel.send("❌ I don't have permission to ban that member.")
+            except Exception as _e_ban:
+                await message.channel.send(f"❌ Error: {_e_ban}")
+            return
+
+        # ════════════════════════════════════════════════════════════════════
         # nick  — nickname shortcut (no prefix)
         # ════════════════════════════════════════════════════════════════════
         if _np_lower == "nick" or _np_lower.startswith("nick "):
@@ -3598,96 +3844,6 @@ async def on_message(message):
                     message.content = f"!{_sc_full2}" + (f" {_sc_rest2}" if _sc_rest2 else "")
 
 
-    # --- GCREATE INTERACTIVE SESSION ---
-    if message.guild is not None and not message.author.bot and not message.content.startswith(bot.command_prefix):
-        _gs = _gcreate_sessions.get(message.channel.id)
-        if _gs and message.author.id == _gs["author_id"]:
-            _gs_text = message.content.strip()
-            if _gs_text.lower() == "cancel":
-                _gcreate_sessions.pop(message.channel.id, None)
-                try:
-                    await _gs["q_msg"].delete()
-                except Exception:
-                    pass
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
-                await message.channel.send("❌ Giveaway creation cancelled.", delete_after=5)
-                return
-            step = _gs["step"]
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            if step == 1:
-                _gs["prize"] = _gs_text
-                _gs["step"] = 2
-                try:
-                    await _gs["q_msg"].delete()
-                except Exception:
-                    pass
-                _embed2 = discord.Embed(
-                    color=0xFFD700,
-                    title="🎉 Create a Giveaway — Step 2/3",
-                    description=(
-                        f"**Prize:** {_gs_text}\n\n"
-                        "**How long should the giveaway last?**\n\n"
-                        "Examples: `10m` (10 minutes), `2h` (2 hours), `1d` (1 day)\n"
-                        "*(Type `cancel` to stop.)*"
-                    ),
-                )
-                _gs["q_msg"] = await message.channel.send(embed=_embed2)
-            elif step == 2:
-                _secs = parse_duration(_gs_text)
-                if _secs is None or _secs < 10:
-                    bad = await message.channel.send(
-                        "❌ Invalid duration. Use `10m`, `2h`, `1d` (min 10 seconds). Try again.",
-                        delete_after=8,
-                    )
-                    return
-                _gs["duration"] = _secs
-                _gs["step"] = 3
-                try:
-                    await _gs["q_msg"].delete()
-                except Exception:
-                    pass
-                _embed3 = discord.Embed(
-                    color=0xFFD700,
-                    title="🎉 Create a Giveaway — Step 3/3",
-                    description=(
-                        f"**Prize:** {_gs['prize']}\n"
-                        f"**Duration:** {_gs_text}\n\n"
-                        "**How many winners? (1–10)**\n"
-                        "*(Type `cancel` to stop.)*"
-                    ),
-                )
-                _gs["q_msg"] = await message.channel.send(embed=_embed3)
-            elif step == 3:
-                try:
-                    _w_count = max(1, min(10, int(_gs_text)))
-                except ValueError:
-                    bad = await message.channel.send("❌ Please enter a number between 1 and 10.", delete_after=8)
-                    return
-                _gcreate_sessions.pop(message.channel.id, None)
-                try:
-                    await _gs["q_msg"].delete()
-                except Exception:
-                    pass
-                confirm = discord.Embed(
-                    color=0x2ECC71,
-                    title="✅ Giveaway Launching!",
-                    description=(
-                        f"🎁 **Prize:** {_gs['prize']}\n"
-                        f"🏆 **Winners:** {_w_count}\n"
-                        f"⏰ **Duration:** {_gs_text}"
-                    ),
-                )
-                await message.channel.send(embed=confirm, delete_after=5)
-                asyncio.create_task(
-                    _launch_giveaway(message.channel, _gs["prize"], message.author, _w_count, _gs["duration"])
-                )
-            return
 
     await bot.process_commands(message)
 
