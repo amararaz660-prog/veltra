@@ -2895,23 +2895,26 @@ async def on_message(message):
             if _as_text:
                 _as_prev = _spam_tracker.get(_as_key, {"last_msg": "", "count": 0, "last_time": 0.0})
                 if _as_text == _as_prev["last_msg"] and (_as_now - _as_prev["last_time"]) < 8:
-                    # Same exact message repeated — timeout immediately
-                    _spam_tracker[_as_key] = {"last_msg": _as_text, "count": 0, "last_time": _as_now}
-                    try:
-                        await message.delete()
-                    except Exception:
-                        pass
-                    _as_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=1)
-                    try:
-                        await message.author.timeout(_as_until, reason="Anti-spam: repeated identical message")
-                        await message.channel.send(
-                            f"🔇 {message.author.mention} کاتی بێدەنگی بۆ **1 خولەک** بەهۆی تکراری پەیام.\n"
-                            "Timed out for **1 minute** for spamming the same message.",
-                            delete_after=10,
-                        )
-                    except (discord.Forbidden, discord.HTTPException):
-                        pass
-                    return
+                    # Same message repeated — increment counter
+                    _as_count = _as_prev["count"] + 1
+                    _spam_tracker[_as_key] = {"last_msg": _as_text, "count": _as_count, "last_time": _as_now}
+                    if _as_count >= 5:
+                        # 5th repeat — timeout
+                        _spam_tracker[_as_key] = {"last_msg": _as_text, "count": 0, "last_time": _as_now}
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+                        _as_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=1)
+                        try:
+                            await message.author.timeout(_as_until, reason="Anti-spam: repeated identical message 5 times")
+                            await message.channel.send(
+                                f"🔇 {message.author.mention} Timed out for **1 minute** for sending the same message 5 times.",
+                                delete_after=10,
+                            )
+                        except (discord.Forbidden, discord.HTTPException):
+                            pass
+                        return
                 else:
                     _spam_tracker[_as_key] = {"last_msg": _as_text, "count": 1, "last_time": _as_now}
 
@@ -3593,6 +3596,98 @@ async def on_message(message):
                 _sc_full2  = commandshortcuts_data.get(str(message.guild.id), {}).get(_sc_typed2)
                 if _sc_full2 is not None:
                     message.content = f"!{_sc_full2}" + (f" {_sc_rest2}" if _sc_rest2 else "")
+
+
+    # --- GCREATE INTERACTIVE SESSION ---
+    if message.guild is not None and not message.author.bot and not message.content.startswith(bot.command_prefix):
+        _gs = _gcreate_sessions.get(message.channel.id)
+        if _gs and message.author.id == _gs["author_id"]:
+            _gs_text = message.content.strip()
+            if _gs_text.lower() == "cancel":
+                _gcreate_sessions.pop(message.channel.id, None)
+                try:
+                    await _gs["q_msg"].delete()
+                except Exception:
+                    pass
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                await message.channel.send("❌ Giveaway creation cancelled.", delete_after=5)
+                return
+            step = _gs["step"]
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            if step == 1:
+                _gs["prize"] = _gs_text
+                _gs["step"] = 2
+                try:
+                    await _gs["q_msg"].delete()
+                except Exception:
+                    pass
+                _embed2 = discord.Embed(
+                    color=0xFFD700,
+                    title="🎉 Create a Giveaway — Step 2/3",
+                    description=(
+                        f"**Prize:** {_gs_text}\n\n"
+                        "**How long should the giveaway last?**\n\n"
+                        "Examples: `10m` (10 minutes), `2h` (2 hours), `1d` (1 day)\n"
+                        "*(Type `cancel` to stop.)*"
+                    ),
+                )
+                _gs["q_msg"] = await message.channel.send(embed=_embed2)
+            elif step == 2:
+                _secs = parse_duration(_gs_text)
+                if _secs is None or _secs < 10:
+                    bad = await message.channel.send(
+                        "❌ Invalid duration. Use `10m`, `2h`, `1d` (min 10 seconds). Try again.",
+                        delete_after=8,
+                    )
+                    return
+                _gs["duration"] = _secs
+                _gs["step"] = 3
+                try:
+                    await _gs["q_msg"].delete()
+                except Exception:
+                    pass
+                _embed3 = discord.Embed(
+                    color=0xFFD700,
+                    title="🎉 Create a Giveaway — Step 3/3",
+                    description=(
+                        f"**Prize:** {_gs['prize']}\n"
+                        f"**Duration:** {_gs_text}\n\n"
+                        "**How many winners? (1–10)**\n"
+                        "*(Type `cancel` to stop.)*"
+                    ),
+                )
+                _gs["q_msg"] = await message.channel.send(embed=_embed3)
+            elif step == 3:
+                try:
+                    _w_count = max(1, min(10, int(_gs_text)))
+                except ValueError:
+                    bad = await message.channel.send("❌ Please enter a number between 1 and 10.", delete_after=8)
+                    return
+                _gcreate_sessions.pop(message.channel.id, None)
+                try:
+                    await _gs["q_msg"].delete()
+                except Exception:
+                    pass
+                confirm = discord.Embed(
+                    color=0x2ECC71,
+                    title="✅ Giveaway Launching!",
+                    description=(
+                        f"🎁 **Prize:** {_gs['prize']}\n"
+                        f"🏆 **Winners:** {_w_count}\n"
+                        f"⏰ **Duration:** {_gs_text}"
+                    ),
+                )
+                await message.channel.send(embed=confirm, delete_after=5)
+                asyncio.create_task(
+                    _launch_giveaway(message.channel, _gs["prize"], message.author, _w_count, _gs["duration"])
+                )
+            return
 
     await bot.process_commands(message)
 
@@ -7118,7 +7213,7 @@ async def say_error(ctx, error):
         await ctx.send("Usage: $say <message> | بەکارهێنان: $say <پەیام>")
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(kick_members=True)
 async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     if member == ctx.author:
         return await ctx.send("❌ You cannot kick yourself.", delete_after=8)
@@ -7146,14 +7241,14 @@ async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided
 @kick.error
 async def kick_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Only administrators can use this command.", delete_after=8)
+        await ctx.send("❌ You need the **Kick Members** permission to use this command.", delete_after=8)
     elif isinstance(error, commands.MemberNotFound):
         await ctx.send("❌ Member not found.", delete_after=8)
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("Usage: `!kick @member [reason]`", delete_after=8)
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(ban_members=True)
 async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     if member == ctx.author:
         return await ctx.send("❌ You cannot ban yourself.", delete_after=8)
@@ -7181,7 +7276,7 @@ async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"
 @ban.error
 async def ban_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Only administrators can use this command.", delete_after=8)
+        await ctx.send("❌ You need the **Ban Members** permission to use this command.", delete_after=8)
     elif isinstance(error, commands.MemberNotFound):
         await ctx.send("❌ Member not found.", delete_after=8)
     elif isinstance(error, commands.MissingRequiredArgument):
@@ -7193,11 +7288,18 @@ async def unban(ctx, user_id: int, *, reason: str = "No reason provided | هیچ
     try:
         user = await bot.fetch_user(user_id)
         await ctx.guild.unban(user, reason=reason)
-        await ctx.send(f"Unbanned {user}. | بلۆکی {user} لادرا.")
+        embed_unban = discord.Embed(
+            title="✅ Member Unbanned",
+            color=0x2ECC71,
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed_unban.add_field(name="👤 User", value=f"{user} (`{user.id}`)", inline=False)
+        embed_unban.add_field(name="📋 Reason", value=reason, inline=False)
+        await ctx.send(embed=embed_unban)
     except discord.NotFound:
-        await ctx.send("That user is not banned (or does not exist). | ئەم بەکارهێنەرە بلۆک نەکراوە (یان بوونی نییە).")
+        await ctx.send("❌ That user is not banned or does not exist.")
     except discord.Forbidden:
-        await ctx.send("I don't have permission to unban users. | مووچەم نییە بلۆکی بەکارهێنەران بلادەم.")
+        await ctx.send("❌ I don't have permission to unban users.")
 
 @unban.error
 async def unban_error(ctx, error):
@@ -7210,7 +7312,7 @@ async def unban_error(ctx, error):
 @commands.has_permissions(moderate_members=True)
 async def mute(ctx, member: discord.Member, minutes: int = 10, *, reason: str = "No reason provided | هیچ هۆکارێک نەدراوە"):
     if minutes < 1 or minutes > 40320:
-        await ctx.send("Duration must be between 1 minute and 28 days (40320 minutes). | ماوە دەبێت لە نێوان ١ خولەک و ٢٨ رۆژ (40320 خولەک) بێت.")
+        await ctx.send("❌ Duration must be between 1 minute and 28 days (40320 minutes).")
         return
     # ── Role hierarchy check ─────────────────────────────────────────────────
     if ctx.author != ctx.guild.owner:
@@ -7223,7 +7325,18 @@ async def mute(ctx, member: discord.Member, minutes: int = 10, *, reason: str = 
     until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes)
     try:
         await member.timeout(until, reason=reason)
-        await ctx.send(f"Muted {member.mention} for {minutes} minute(s). Reason: {reason} | {member.mention} بێدەنگ کرا بۆ {minutes} خولەک. هۆکار: {reason}")
+        embed_mute = discord.Embed(
+            title="🔇 Member Timed Out",
+            color=0xE67E22,
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed_mute.add_field(name="👤 Member", value=f"{member.mention} (`{member.id}`)", inline=False)
+        embed_mute.add_field(name="⏱️ Duration", value=f"**{minutes}** minute(s)", inline=True)
+        embed_mute.add_field(name="📋 Reason", value=reason, inline=True)
+        embed_mute.add_field(name="👮 Moderator", value=ctx.author.mention, inline=False)
+        embed_mute.set_thumbnail(url=member.display_avatar.url)
+        embed_mute.set_footer(text=f"Timed out by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+        await ctx.send(embed=embed_mute)
     except discord.Forbidden:
         await ctx.send("I don't have permission to time out that member. | مووچەم نییە ئەم ئەندامە بێدەنگ بکەم.")
 
@@ -7246,7 +7359,15 @@ async def unmute(ctx, member: discord.Member = None):
         return
     try:
         await member.timeout(None, reason=f"Timeout removed by {ctx.author}")
-        await ctx.send(f"Removed timeout from {member.mention}. | بێدەنگیی {member.mention} لادرا.")
+        embed_unmute = discord.Embed(
+            title="✅ Timeout Removed",
+            color=0x2ECC71,
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed_unmute.add_field(name="👤 Member", value=member.mention, inline=True)
+        embed_unmute.add_field(name="👮 Removed By", value=ctx.author.mention, inline=True)
+        embed_unmute.set_thumbnail(url=member.display_avatar.url)
+        await ctx.send(embed=embed_unmute)
     except discord.Forbidden:
         await ctx.send("I don't have permission to remove the timeout. | مووچەم نییە بێدەنگیەکە لابدەم.")
     except discord.HTTPException as e:
@@ -9407,6 +9528,33 @@ async def antinuke_error(ctx, error):
         await ctx.send("❌ Only administrators can use this command.", delete_after=8)
 
 
+@bot.command(name="removeantinuke")
+@commands.has_permissions(administrator=True)
+async def removeantinuke_cmd(ctx):
+    """Disable and clear the anti-nuke system for this server."""
+    if ctx.guild is None:
+        return await ctx.send("Server only.")
+    gid = str(ctx.guild.id)
+    antinuke_enabled[gid] = False
+    antinuke_safe_roles.pop(gid, None)
+    _antinuke_actions.pop(gid, None)
+    embed = discord.Embed(
+        title="🛡️ Anti-Nuke Removed",
+        description=(
+            "Anti-nuke has been **disabled** and all safe roles have been cleared.\n\n"
+            "Use `!antinuke on` to re-enable it."
+        ),
+        color=discord.Color.red(),
+    )
+    embed.set_footer(text=f"Removed by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+
+@removeantinuke_cmd.error
+async def removeantinuke_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Only administrators can use this command.", delete_after=8)
+
+
 @bot.command(name="antispam")
 @commands.has_permissions(administrator=True)
 async def antispam_cmd(ctx, mode: str = "on"):
@@ -9441,6 +9589,31 @@ async def antispam_cmd(ctx, mode: str = "on"):
 
 @antispam_cmd.error
 async def antispam_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Only administrators can use this command.", delete_after=8)
+
+
+@bot.command(name="removeantispam")
+@commands.has_permissions(administrator=True)
+async def removeantispam_cmd(ctx):
+    """Disable and clear the anti-spam system for this server."""
+    if ctx.guild is None:
+        return await ctx.send("Server only.")
+    gid = str(ctx.guild.id)
+    antispam_enabled[gid] = False
+    embed = discord.Embed(
+        title="🔇 Anti-Spam Removed",
+        description=(
+            "Anti-spam has been **disabled**.\n\n"
+            "Use `!antispam on` to re-enable it."
+        ),
+        color=discord.Color.red(),
+    )
+    embed.set_footer(text=f"Removed by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+
+@removeantispam_cmd.error
+async def removeantispam_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("❌ Only administrators can use this command.", delete_after=8)
 
@@ -12368,7 +12541,7 @@ def format_duration(seconds: int) -> str:
 # --- GIVEAWAY SYSTEM ---
 # ─────────────────────────────────────────────────────────────────────────────
 
-GIVEAWAY_EMOJI = "🌟"
+GIVEAWAY_EMOJI = "🎉"
 
 
 def _build_giveaway_embed(
@@ -12379,30 +12552,40 @@ def _build_giveaway_embed(
     ended: bool = False,
     winners=None,
 ) -> discord.Embed:
-    color = 0xFFD700
     if ended:
-        title = "🎉 بەخشین کۆتایی هات! | Giveaway Ended!"
-        desc = f"**خەڵات | Prize:** {prize}\n\n"
-        if winners:
-            mentions = " ".join(w.mention for w in winners)
-            desc += f"🏆 **بەختەوار | Winner(s):** {mentions}"
-        else:
-            desc += "😢 هیچ بەشداریێک نەبوو — بەختەوار نییە | No valid entries — no winner."
-    else:
-        title = "🌟 G I V E A W A Y | بەخشین 🌟"
-        desc = (
-            f"**خەڵات | Prize:** {prize}\n\n"
-            f"React with {GIVEAWAY_EMOJI} to enter! | بکرتە لەسەر {GIVEAWAY_EMOJI} بۆ بەشداری!\n\n"
-            f"**کۆتایی | Ends:** <t:{int(end_time.timestamp())}:R>\n"
-            f"**بەختەوار | Winners:** {winners_count}"
+        embed = discord.Embed(
+            title="GIVEAWAY ENDED 💝",
+            color=0xED4245,
+            timestamp=datetime.datetime.utcnow(),
         )
-    embed = discord.Embed(title=title, description=desc, color=color)
-    embed.set_footer(
-        text=f"لەلایەن | Hosted by {host.display_name}  •  "
-             f"{'Ended' if ended else 'Ends'}: {end_time.strftime('%m/%d/%y %I:%M %p UTC')}"
-    )
-    embed.timestamp = end_time
+        embed.add_field(name="🎁 Prize", value=prize, inline=True)
+        embed.add_field(
+            name="🕐 Ended",
+            value=end_time.strftime("%m/%d/%Y, %I:%M:%S %p"),
+            inline=True,
+        )
+        embed.add_field(name="🏠 Hosted By", value=host.mention, inline=False)
+        if winners:
+            winner_str = " ".join(f"{w.mention} ({w.id})" for w in winners)
+            embed.add_field(name="🏆 Winners", value=winner_str, inline=False)
+        else:
+            embed.add_field(name="🏆 Winners", value="No valid entries — no winner.", inline=False)
+    else:
+        embed = discord.Embed(
+            title="🎉 GIVEAWAY STARTED",
+            color=0xFFD700,
+            timestamp=end_time,
+        )
+        embed.add_field(name="🎁 Prize", value=prize, inline=True)
+        embed.add_field(name="🏆 Winners", value=str(winners_count), inline=True)
+        embed.add_field(name="🕐 Ends", value=f"<t:{int(end_time.timestamp())}:R>", inline=True)
+        embed.add_field(name="🏠 Hosted By", value=host.mention, inline=False)
+        embed.set_footer(text=f"React with {GIVEAWAY_EMOJI} to enter!")
+    if host.display_avatar:
+        embed.set_thumbnail(url=host.display_avatar.url)
     return embed
+
+mbed
 
 
 async def _end_giveaway(message_id: int, channel: discord.TextChannel):
@@ -12429,13 +12612,11 @@ async def _end_giveaway(message_id: int, channel: discord.TextChannel):
     if winners:
         winner_mentions = " ".join(w.mention for w in winners)
         await channel.send(
-            f"🎊 دەستخۆش {winner_mentions}! تۆ **{data['prize']}** بەردیت!\n"
             f"🎊 Congratulations {winner_mentions}! You won **{data['prize']}**!\n"
-            f"> [Jump to giveaway | بازدە بۆ بەخشینەکە]({msg.jump_url})"
+            f"> [Jump to giveaway]({msg.jump_url})"
         )
     else:
         await channel.send(
-            f"😢 هیچ بەشداریێکی دروستی نەبوو بۆ **{data['prize']}**. بەختەوار هەڵنەبژێرا.\n"
             f"😢 No valid entries for **{data['prize']}**. No winner was selected."
         )
 
@@ -12458,19 +12639,19 @@ async def _launch_giveaway(channel, prize, host, winner_count, seconds):
     await _end_giveaway(giveaway_msg.id, channel)
 
 
-class GiveawayModal(discord.ui.Modal, title="🎉 بەخشینی نوێ | New Giveaway"):
+class GiveawayModal(discord.ui.Modal, title="🎉 New Giveaway"):
     prize = discord.ui.TextInput(
-        label="خەڵات | Prize",
+        label="Prize",
         placeholder="e.g. Discord Nitro, 5000 coins, Steam key...",
         max_length=200,
     )
     duration_input = discord.ui.TextInput(
-        label="ماوە | Duration  (10m / 2h / 1d)",
+        label="Duration  (10m / 2h / 1d)",
         placeholder="10m = 10 minutes · 2h = 2 hours · 1d = 1 day",
         max_length=10,
     )
     winners_input = discord.ui.TextInput(
-        label="ژمارەی بەختەوار | Winners (1–10)",
+        label="Winners (1–10)",
         placeholder="1",
         max_length=2,
         default="1",
@@ -12480,7 +12661,7 @@ class GiveawayModal(discord.ui.Modal, title="🎉 بەخشینی نوێ | New Gi
         seconds = parse_duration(self.duration_input.value.strip())
         if seconds is None or seconds < 10:
             return await interaction.response.send_message(
-                "❌ ماوەی نادروست | Invalid duration. Use `10m`, `2h`, `1d` (min 10s).",
+                "❌ Invalid duration. Use `10m`, `2h`, `1d` (min 10s).",
                 ephemeral=True,
             )
         try:
@@ -12488,7 +12669,7 @@ class GiveawayModal(discord.ui.Modal, title="🎉 بەخشینی نوێ | New Gi
         except ValueError:
             winner_count = 1
         await interaction.response.send_message(
-            f"✅ بەخشینەکە دەستپێکرا! {winner_count} بەختەوار | Giveaway started! {winner_count} winner(s).",
+            f"✅ Giveaway started! {winner_count} winner(s).",
             ephemeral=True,
         )
         asyncio.create_task(
@@ -12504,66 +12685,66 @@ class GiveawayModal(discord.ui.Modal, title="🎉 بەخشینی نوێ | New Gi
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         try:
             if interaction.response.is_done():
-                await interaction.followup.send(f"❌ هەڵە | Error: {error}", ephemeral=True)
+                await interaction.followup.send(f"❌ Error: {error}", ephemeral=True)
             else:
-                await interaction.response.send_message(f"❌ هەڵە | Error: {error}", ephemeral=True)
+                await interaction.response.send_message(f"❌ Error: {error}", ephemeral=True)
         except Exception:
             pass
 
 
-class GiveawayCreateView(discord.ui.View):
-    def __init__(self, author_id: int):
-        super().__init__(timeout=120)
-        self._author_id = author_id
-
-    @discord.ui.button(
-        label="🎉 دروستکردنی بەخشین | Create Giveaway",
-        style=discord.ButtonStyle.success,
-        custom_id="gw_start_btn",
-    )
-    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self._author_id:
-            return await interaction.response.send_message(
-                "❌ تەنها ئەو کەسە دەتوانێت کلیک بکات | Only the command author can use this.",
-                ephemeral=True,
-            )
-        await interaction.response.send_modal(GiveawayModal())
-        self.stop()
+# Active pending gcreate sessions: {channel_id: {author_id, step, data}}
+_gcreate_sessions: dict = {}
 
 
 @bot.command(name="gcreate", aliases=["gstart"])
 @commands.has_permissions(manage_guild=True)
 async def gcreate_cmd(ctx):
-    """Start a giveaway — one click then fill in the form."""
+    """Start a giveaway via an interactive 3-question flow (admins only)."""
     if ctx.guild is None:
-        return await ctx.send("Server only. | تەنها لە سێرڤەر.")
+        return await ctx.send("❌ Server only.")
+    if not ctx.author.guild_permissions.administrator and not ctx.author.guild_permissions.manage_guild:
+        return await ctx.send("❌ Only admins can use this command.")
     try:
         await ctx.message.delete()
     except discord.Forbidden:
         pass
+
+    # Cancel any existing session for this channel
+    _gcreate_sessions.pop(ctx.channel.id, None)
+
     embed = discord.Embed(
         color=0xFFD700,
-        title="🎉 دروستکردنی بەخشین | Create a Giveaway",
+        title="🎉 Create a Giveaway — Step 1/3",
         description=(
-            "دەگمەی خوارەوە دابگرە، خەڵات، ماوە و ژمارەی بەختەوار پڕبکەرەوە.\n\n"
-            "Click the button below, then fill in the prize, duration, and number of winners."
+            "**What is the prize?**\n\n"
+            "Type the prize name in this channel.\n"
+            "*(Type `cancel` at any time to cancel.)*"
         ),
     )
     embed.set_footer(text=f"Requested by {ctx.author.display_name}")
-    await ctx.send(embed=embed, view=GiveawayCreateView(ctx.author.id))
+    q1 = await ctx.send(embed=embed)
+
+    _gcreate_sessions[ctx.channel.id] = {
+        "author_id": ctx.author.id,
+        "step": 1,
+        "prize": None,
+        "duration": None,
+        "winners": None,
+        "q_msg": q1,
+    }
 
 
 @bot.command(name="greroll")
 @commands.has_permissions(manage_guild=True)
 async def greroll(ctx, message_id: int = None):
-    """Reroll a giveaway winner. | بەختەوارێکی نوێ هەڵبژێرە. Usage: $greroll <message_id>"""
+    """Reroll a giveaway winner. Usage: !greroll <message_id>"""
     if not message_id:
-        await ctx.send("❌ ناسنامەی پەیامی بەخشینەکە بدە | Provide the giveaway message ID. `!greroll <message_id>`", delete_after=10)
+        await ctx.send("❌ Provide the giveaway message ID. `!greroll <message_id>`", delete_after=10)
         return
     try:
         msg = await ctx.channel.fetch_message(message_id)
     except discord.NotFound:
-        await ctx.send("❌ پەیامەکە نەدۆزرایەوە لەم کەناڵە | Message not found in this channel.", delete_after=10)
+        await ctx.send("❌ Message not found in this channel.", delete_after=10)
         return
     entrants = []
     for reaction in msg.reactions:
@@ -12573,13 +12754,12 @@ async def greroll(ctx, message_id: int = None):
                     entrants.append(user)
             break
     if not entrants:
-        await ctx.send("😢 هیچ بەشداریێکی دروستی نییە | No valid entries to reroll.", delete_after=10)
+        await ctx.send("😢 No valid entries to reroll.", delete_after=10)
         return
     winner = random.choice(entrants)
     await ctx.send(
-        f"🎊 بەختەوارەکەی نوێ: {winner.mention}! دەستخۆش!\n"
         f"🎊 New winner: {winner.mention}! Congratulations!\n"
-        f"> [Jump to giveaway | بازدە بۆ بەخشینەکە]({msg.jump_url})"
+        f"> [Jump to giveaway]({msg.jump_url})"
     )
 
 
@@ -12588,16 +12768,16 @@ async def greroll(ctx, message_id: int = None):
 async def gend(ctx, message_id: int = None):
     """Force-end an active giveaway. | بەخشینێک زووتر کۆتایی پێبهێنە. Usage: $gend <message_id>"""
     if not message_id:
-        await ctx.send("❌ ناسنامەی پەیامی بەخشینەکە بدە | Provide the giveaway message ID. `!gend <message_id>`", delete_after=10)
+        await ctx.send("❌ Provide the giveaway message ID. `!gend <message_id>`", delete_after=10)
         return
     if message_id not in active_giveaways:
-        await ctx.send("❌ هیچ بەخشینی چالاکی نەدۆزرایەوە بە ئەو ناسنامەیە | No active giveaway found with that ID.", delete_after=10)
+        await ctx.send("❌ No active giveaway found with that ID.", delete_after=10)
         return
     data = active_giveaways[message_id]
     channel = bot.get_channel(data["channel_id"])
     if channel:
         await _end_giveaway(message_id, channel)
-    await ctx.send("✅ کۆتایی هێنرا بەخشینەکە | Giveaway ended early.", delete_after=5)
+    await ctx.send("✅ Giveaway ended early.", delete_after=5)
 
 
 @bot.command(name="glist")
@@ -12610,24 +12790,24 @@ async def glist(ctx):
         bot.get_channel(data["channel_id"]).guild.id == ctx.guild.id
     }
     if not server_giveaways:
-        await ctx.send("📋 هیچ بەخشینی چالاکی نییە ئێستا | No active giveaways right now.")
+        await ctx.send("📋 No active giveaways right now.")
         return
     embed = discord.Embed(
-        title="🎉 بەخشینە چالاکەکان | Active Giveaways",
+        title="🎉 Active Giveaways",
         color=0xF5A623,
         timestamp=datetime.datetime.utcnow(),
     )
     for msg_id, data in server_giveaways.items():
         embed.add_field(
-            name=f"🌟 {data['prize']}",
+            name=f"🎁 {data['prize']}",
             value=(
-                f"🏆 بەختەوار | Winners: `{data['winners_count']}`\n"
-                f"⏳ کۆتایی | Ends: <t:{int(data['end_time'].timestamp())}:R>\n"
+                f"🏆 Winners: `{data['winners_count']}`\n"
+                f"⏳ Ends: <t:{int(data['end_time'].timestamp())}:R>\n"
                 f"🔑 Message ID: `{msg_id}`"
             ),
             inline=False,
         )
-    embed.set_footer(text=f"لەلایەن | Requested by {ctx.author.display_name}")
+    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
     await ctx.send(embed=embed)
 
 
@@ -12636,9 +12816,9 @@ async def glist(ctx):
 @gend.error
 async def _giveaway_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ پێویستت بە مووچەی **Manage Server** هەیە | You need **Manage Server** permission.", delete_after=10)
+        await ctx.send("❌ You need **Manage Server** permission.", delete_after=10)
     else:
-        await ctx.send(f"❌ هەڵە | Error: {error}", delete_after=10)
+        await ctx.send(f"❌ Error: {error}", delete_after=10)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
