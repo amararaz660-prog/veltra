@@ -12037,6 +12037,19 @@ class ShopTicketPanelView(discord.ui.View):
                         attach_files=True,
                     )
 
+            # Give admin/owner roles access too (those with Administrator permission)
+            admin_role_ids = []
+            for role in guild.roles:
+                if role.permissions.administrator and not role.is_default():
+                    if role not in overwrites:
+                        overwrites[role] = discord.PermissionOverwrite(
+                            view_channel=True, send_messages=True,
+                            read_message_history=True, manage_messages=True,
+                            attach_files=True,
+                        )
+                    if str(role.id) not in [str(r) for r in shop_role_ids]:
+                        admin_role_ids.append(role.id)
+
             try:
                 shop_ch = await guild.create_text_channel(
                     name="shop-" + safe_name,
@@ -12068,6 +12081,8 @@ class ShopTicketPanelView(discord.ui.View):
 
             mention_str = interaction.user.mention
             for rid in shop_role_ids:
+                mention_str += " <@&" + str(rid) + ">"
+            for rid in admin_role_ids:
                 mention_str += " <@&" + str(rid) + ">"
 
             try:
