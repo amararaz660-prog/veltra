@@ -2143,6 +2143,52 @@ def load_antiswear_settings():
 
 
 
+# --- AUTO-BOOST-ROLE globals + load/save ---
+autoboostrole_settings = {}  # {guild_id_str: role_id}
+
+def load_autoboostrole():
+    global autoboostrole_settings
+    autoboostrole_settings = {}
+    try:
+        conn = get_db()
+        for row in conn.execute("SELECT guild_id, role_id FROM autoboostrole_settings"):
+            autoboostrole_settings[str(row["guild_id"])] = int(row["role_id"])
+        conn.close()
+    except Exception:
+        pass
+
+def save_autoboostrole(guild_id: int, role_id: int):
+    autoboostrole_settings[str(guild_id)] = role_id
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO autoboostrole_settings (guild_id, role_id) VALUES (?,?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET role_id=excluded.role_id",
+        (int(guild_id), int(role_id))
+    )
+    conn.commit()
+    conn.close()
+
+# --- ANTI-SPAM DB persist helpers ---
+def load_antispam_from_db():
+    global antispam_enabled
+    try:
+        conn = get_db()
+        for row in conn.execute("SELECT guild_id, enabled FROM antispam_settings"):
+            antispam_enabled[str(row["guild_id"])] = bool(row["enabled"])
+        conn.close()
+    except Exception:
+        pass
+
+def save_antispam_enabled_db(guild_id: str, enabled: bool):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO antispam_settings (guild_id, enabled) VALUES (?,?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
+        (int(guild_id), 1 if enabled else 0)
+    )
+    conn.commit()
+    conn.close()
+
 # ═══════════════ AUTO-REACT LOAD / SAVE ═══════════════
 
 def load_autoreact():
@@ -9568,51 +9614,6 @@ ANTINUKE_WINDOW     = 10   # seconds
 # --- ANTI-SPAM globals ---
 antispam_enabled = {}  # {guild_id_str: bool}
 _spam_tracker    = {}  # {(guild_id, user_id): {last_msg, count, last_time}}
-
-# --- AUTO-BOOST-ROLE globals ---
-autoboostrole_settings = {}  # {guild_id_str: role_id}
-
-def load_autoboostrole():
-    global autoboostrole_settings
-    autoboostrole_settings = {}
-    try:
-        conn = get_db()
-        for row in conn.execute("SELECT guild_id, role_id FROM autoboostrole_settings"):
-            autoboostrole_settings[str(row["guild_id"])] = int(row["role_id"])
-        conn.close()
-    except Exception:
-        pass
-
-def save_autoboostrole(guild_id: int, role_id: int):
-    autoboostrole_settings[str(guild_id)] = role_id
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO autoboostrole_settings (guild_id, role_id) VALUES (?,?) "
-        "ON CONFLICT(guild_id) DO UPDATE SET role_id=excluded.role_id",
-        (int(guild_id), int(role_id))
-    )
-    conn.commit()
-    conn.close()
-
-def load_antispam_from_db():
-    global antispam_enabled
-    try:
-        conn = get_db()
-        for row in conn.execute("SELECT guild_id, enabled FROM antispam_settings"):
-            antispam_enabled[str(row["guild_id"])] = bool(row["enabled"])
-        conn.close()
-    except Exception:
-        pass
-
-def save_antispam_enabled_db(guild_id: str, enabled: bool):
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO antispam_settings (guild_id, enabled) VALUES (?,?) "
-        "ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
-        (int(guild_id), 1 if enabled else 0)
-    )
-    conn.commit()
-    conn.close()
 
 def _antinuke_record(guild_id: int, user_id: int) -> bool:
     """Record a destructive action. Returns True if threshold exceeded."""
