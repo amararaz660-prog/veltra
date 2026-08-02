@@ -576,6 +576,14 @@ def init_db():
             guild_id BIGINT PRIMARY KEY,
             enabled  SMALLINT DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS autoboostrole_settings (
+            guild_id BIGINT PRIMARY KEY,
+            role_id  BIGINT
+        );
+        CREATE TABLE IF NOT EXISTS antispam_settings (
+            guild_id BIGINT PRIMARY KEY,
+            enabled  SMALLINT DEFAULT 0
+        );
         CREATE TABLE IF NOT EXISTS antilink_channels (
             guild_id   BIGINT,
             channel_id BIGINT,
@@ -2477,6 +2485,8 @@ load_verify_settings()
 load_eventspeed_settings()
 load_commandshortcuts()
 load_welcomestaff_settings()
+load_autoboostrole()
+load_antispam_from_db()
 
 # --- BOT EVENTS ---
 
@@ -2917,15 +2927,6 @@ async def on_message(message):
                         return
                 else:
                     _spam_tracker[_as_key] = {"last_msg": _as_text, "count": 1, "last_time": _as_now}
-
-    # --- WORD FILTER ---
-    if "shit" in message.content.lower():
-        try:
-            await message.delete()
-            await message.channel.send(f"{message.author.mention} - don't use that word! | ئەو وشەیە مەبەکارهێنە!")
-        except discord.Forbidden:
-            pass
-        return
 
     # --- MINI-GAMES INTERCEPTS ---
     if message.channel.id in number_games and message.content.strip().isdigit():
@@ -4014,6 +4015,16 @@ async def on_member_update(before, after):
     was_boosting = before.premium_since is not None
     now_boosting = after.premium_since  is not None
     if not was_boosting and now_boosting:
+        # ── Auto-boost role assignment ────────────────────────────────────
+        _abr_role_id = autoboostrole_settings.get(gid)
+        if _abr_role_id:
+            _abr_role = after.guild.get_role(int(_abr_role_id))
+            if _abr_role and _abr_role not in after.roles:
+                try:
+                    await after.add_roles(_abr_role, reason="Auto-boost role: member boosted the server")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
         cid = boost_channels.get(gid)
         if cid:
             ch = after.guild.get_channel(int(cid))
@@ -9558,6 +9569,51 @@ ANTINUKE_WINDOW     = 10   # seconds
 antispam_enabled = {}  # {guild_id_str: bool}
 _spam_tracker    = {}  # {(guild_id, user_id): {last_msg, count, last_time}}
 
+# --- AUTO-BOOST-ROLE globals ---
+autoboostrole_settings = {}  # {guild_id_str: role_id}
+
+def load_autoboostrole():
+    global autoboostrole_settings
+    autoboostrole_settings = {}
+    try:
+        conn = get_db()
+        for row in conn.execute("SELECT guild_id, role_id FROM autoboostrole_settings"):
+            autoboostrole_settings[str(row["guild_id"])] = int(row["role_id"])
+        conn.close()
+    except Exception:
+        pass
+
+def save_autoboostrole(guild_id: int, role_id: int):
+    autoboostrole_settings[str(guild_id)] = role_id
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO autoboostrole_settings (guild_id, role_id) VALUES (?,?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET role_id=excluded.role_id",
+        (int(guild_id), int(role_id))
+    )
+    conn.commit()
+    conn.close()
+
+def load_antispam_from_db():
+    global antispam_enabled
+    try:
+        conn = get_db()
+        for row in conn.execute("SELECT guild_id, enabled FROM antispam_settings"):
+            antispam_enabled[str(row["guild_id"])] = bool(row["enabled"])
+        conn.close()
+    except Exception:
+        pass
+
+def save_antispam_enabled_db(guild_id: str, enabled: bool):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO antispam_settings (guild_id, enabled) VALUES (?,?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
+        (int(guild_id), 1 if enabled else 0)
+    )
+    conn.commit()
+    conn.close()
+
 def _antinuke_record(guild_id: int, user_id: int) -> bool:
     """Record a destructive action. Returns True if threshold exceeded."""
     gid, uid = str(guild_id), str(user_id)
@@ -9719,6 +9775,7 @@ async def antispam_cmd(ctx, mode: str = "on"):
     mode = mode.lower()
     if mode in ("on", "enable", "true", "1"):
         antispam_enabled[gid] = True
+        save_antispam_enabled_db(gid, True)
         embed = discord.Embed(
             title="🔇 Anti-Spam Enabled",
             description=(
@@ -9731,6 +9788,7 @@ async def antispam_cmd(ctx, mode: str = "on"):
         )
     elif mode in ("off", "disable", "false", "0"):
         antispam_enabled[gid] = False
+        save_antispam_enabled_db(gid, False)
         embed = discord.Embed(
             title="🔇 Anti-Spam Disabled",
             description="ئانتی-سپام ناچالاک کرا. | Anti-spam turned **OFF**.",
@@ -9757,6 +9815,7 @@ async def removeantispam_cmd(ctx):
         return await ctx.send("Server only.")
     gid = str(ctx.guild.id)
     antispam_enabled[gid] = False
+    save_antispam_enabled_db(gid, False)
     embed = discord.Embed(
         title="🔇 Anti-Spam Removed",
         description=(
@@ -12741,7 +12800,6 @@ def _build_giveaway_embed(
         embed.set_thumbnail(url=host.display_avatar.url)
     return embed
 
-mbed
 
 
 async def _end_giveaway(message_id: int, channel: discord.TextChannel):
@@ -17743,6 +17801,81 @@ async def commandshortcut_error(ctx, error):
         await ctx.send("❌ تەنها بەڕێوەبەران دەتوانن کورتکراوەکان بەڕێوەببەن. | Only administrators can manage shortcuts.")
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("Usage: `!commandshortcut !fullcommand !shortcut`  |  `!commandshortcut list`  |  `!commandshortcut remove !shortcut`")
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# --- AUTO BOOST ROLE COMMAND ---
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.command(name="autoboostrole")
+@commands.has_permissions(manage_guild=True)
+async def autoboostrole_cmd(ctx, role: discord.Role = None):
+    """Set the role that is automatically given when someone boosts the server.
+    Usage: !autoboostrole @role  — set the boost role
+           !autoboostrole off    — remove the boost role
+           !autoboostrole        — show current setting
+    """
+    if ctx.guild is None:
+        return await ctx.send("Server only.")
+    gid = str(ctx.guild.id)
+
+    # Show current setting if no args
+    if role is None:
+        # Check if they typed 'off' as a string argument
+        _raw_args = ctx.message.content.strip().split(None, 1)
+        if len(_raw_args) > 1 and _raw_args[1].lower() in ("off", "remove", "clear", "none"):
+            autoboostrole_settings.pop(gid, None)
+            conn = get_db()
+            conn.execute("DELETE FROM autoboostrole_settings WHERE guild_id=?", (ctx.guild.id,))
+            conn.commit()
+            conn.close()
+            embed = discord.Embed(
+                title="✅ Auto-Boost Role Removed",
+                description="No role will be auto-assigned when someone boosts the server.",
+                color=discord.Color.orange(),
+            )
+            return await ctx.send(embed=embed)
+
+        current_id = autoboostrole_settings.get(gid)
+        if current_id:
+            current_role = ctx.guild.get_role(int(current_id))
+            role_text = current_role.mention if current_role else f"`{current_id}` (deleted)"
+        else:
+            role_text = "*Not set*"
+        embed = discord.Embed(
+            title="🚀 Auto-Boost Role",
+            description=(
+                "**Current Role:** " + str(role_text) + "\n\n"
+                "**Usage:**\n"
+                "`!autoboostrole @role` — set the role\n"
+                "`!autoboostrole off` — remove it\n\n"
+                "When a member boosts the server, they automatically receive this role."
+            ),
+            color=0xFF73FA,
+        )
+        embed.set_footer(text=ctx.guild.name)
+        return await ctx.send(embed=embed)
+
+    # Set the role
+    save_autoboostrole(ctx.guild.id, role.id)
+    embed = discord.Embed(
+        title="✅ Auto-Boost Role Set",
+        description=(
+            "**Role:** " + role.mention + "\n\n"
+            "When someone boosts **" + ctx.guild.name + "**, they will automatically receive " + role.mention + "."
+        ),
+        color=0xFF73FA,
+    )
+    embed.set_footer(text=f"Set by {ctx.author}")
+    await ctx.send(embed=embed)
+
+@autoboostrole_cmd.error
+async def autoboostrole_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You need the **Manage Server** permission to use this command.", delete_after=8)
+    elif isinstance(error, commands.RoleNotFound):
+        await ctx.send("❌ Role not found. Please mention a valid role.", delete_after=8)
 
 
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
