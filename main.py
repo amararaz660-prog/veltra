@@ -3259,15 +3259,80 @@ async def on_message(message):
 
     # --- NO-PREFIX LINK TRIGGER ---
     if message.guild is not None and message.content.strip().lower() == "link":
-        with get_db() as _lk_conn:
-            _lk_row = _lk_conn.execute(
-                "SELECT label, url FROM link_settings WHERE guild_id=?", (message.guild.id,)
-            ).fetchone()
-        if _lk_row:
-            _lk_url = _lk_row['url']
-            _lk_content = f"<#{_lk_url}>" if _lk_url.isdigit() else _lk_url
+        _lk_link_row = _get_link_settings(message.guild.id)
+        if _lk_link_row:
+            _lk_url        = _lk_link_row.get("url") or ""
+            _lk_label      = _lk_link_row.get("label") or "🔗 Link"
+            _lk_alignment  = ((_lk_link_row.get("alignment") or "left")).lower()
+            _lk_custom_img = (_lk_link_row.get("image_url") or "").strip()
+            _lk_is_url     = _lk_url.startswith(("http://", "https://"))
+            _lk_is_channel = _lk_url.isdigit()
+            _lk_is_form    = not _lk_is_url and not _lk_is_channel
+
             try:
-                await message.channel.send(_lk_content)
+                # ── Free-form text (no recognised URL/channel) ────────────────
+                if _lk_is_form:
+                    if _lk_custom_img:
+                        _lk_fi = discord.Embed(description=_lk_url, color=0x57F287)
+                        _lk_fi.set_image(url=_lk_custom_img)
+                        await message.channel.send(embed=_lk_fi)
+                    else:
+                        await message.channel.send(_lk_url)
+                    return
+
+                # ── Build rich server-preview embed ───────────────────────────
+                guild = message.guild
+                try:
+                    _lk_online = sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot)
+                except Exception:
+                    _lk_online = 0
+                _lk_total = guild.member_count or 0
+                _lk_est   = guild.created_at.strftime("%B %Y")
+                _lk_desc  = []
+                if guild.description:
+                    _lk_desc.append(guild.description)
+                _lk_desc.append(f"🟢 {_lk_online} Online  •  👥 {_lk_total} Members")
+                _lk_desc.append(f"Est. {_lk_est}")
+
+                _lk_embed = discord.Embed(
+                    title=guild.name,
+                    description="\n".join(_lk_desc),
+                    color=0x57F287,
+                )
+                if guild.icon:
+                    _lk_embed.set_thumbnail(url=guild.icon.url)
+
+                # Image: custom URL takes priority; fall back to guild banner
+                if _lk_custom_img:
+                    _lk_embed.set_image(url=_lk_custom_img)
+                elif guild.banner:
+                    _lk_embed.set_image(url=guild.banner.with_format("png").url)
+
+                _lk_display = f"<#{_lk_url}>" if _lk_is_channel else _lk_url
+                _LK_PAD    = "\u3000" * 16
+                if _lk_alignment == "center":
+                    _lk_embed.add_field(
+                        name =f"\u3000\u3000\u3000\u3000\u3000 🔗 {_lk_label} \u3000\u3000\u3000\u3000\u3000",
+                        value=f"\u3000\u3000\u3000\u3000\u3000 {_lk_display} \u3000\u3000\u3000\u3000\u3000",
+                        inline=False,
+                    )
+                elif _lk_alignment == "right":
+                    _lk_embed.add_field(name=f"{_LK_PAD}🔗 {_lk_label}", value=f"{_LK_PAD}{_lk_display}", inline=False)
+                else:
+                    _lk_embed.add_field(name=f"🔗 {_lk_label}", value=_lk_display, inline=False)
+
+                if _lk_is_channel:
+                    await message.channel.send(embed=_lk_embed)
+                else:
+                    class _LkGoView(discord.ui.View):
+                        def __init__(self):
+                            super().__init__(timeout=None)
+                            self.add_item(discord.ui.Button(
+                                label=f"👉 {_lk_label}",
+                                url=_lk_url,
+                                style=discord.ButtonStyle.link,
+                            ))
+                    await message.channel.send(embed=_lk_embed, view=_LkGoView())
             except (discord.Forbidden, discord.HTTPException):
                 pass
         return
