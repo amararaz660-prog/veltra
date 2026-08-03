@@ -3259,78 +3259,15 @@ async def on_message(message):
 
     # --- NO-PREFIX LINK TRIGGER ---
     if message.guild is not None and message.content.strip().lower() == "link":
-        _lk_link_row = _get_link_settings(message.guild.id)
-        if _lk_link_row:
-            _lk_url        = _lk_link_row.get("url") or ""
-            _lk_label      = _lk_link_row.get("label") or "Go to Server"
-            _lk_custom_img = (_lk_link_row.get("image_url") or "").strip()
-            _lk_is_url     = _lk_url.startswith(("http://", "https://"))
-            _lk_is_channel = _lk_url.isdigit()
-
+        with get_db() as _lk_conn:
+            _lk_row = _lk_conn.execute(
+                "SELECT label, url FROM link_settings WHERE guild_id=?", (message.guild.id,)
+            ).fetchone()
+        if _lk_row:
+            _lk_url = _lk_row['url']
+            _lk_content = f"<#{_lk_url}>" if _lk_url.isdigit() else _lk_url
             try:
-                guild = message.guild
-
-                # ── Server info lines ──────────────────────────────────────────
-                try:
-                    _lk_online = sum(
-                        1 for m in guild.members
-                        if m.status != discord.Status.offline and not m.bot
-                    )
-                except Exception:
-                    _lk_online = 0
-                _lk_total = guild.member_count or 0
-                _lk_est   = guild.created_at.strftime("%B %Y")
-
-                _lk_desc_parts = []
-                if guild.description:
-                    _lk_desc_parts.append(guild.description)
-                _lk_desc_parts.append(
-                    f"🟢 **{_lk_online}** Online  •  👥 **{_lk_total}** Members"
-                )
-                _lk_desc_parts.append(f"Est. {_lk_est}")
-
-                # ── Build embed: title → description → image → button ─────────
-                _lk_embed = discord.Embed(
-                    title=guild.name,
-                    description="\n".join(_lk_desc_parts),
-                    color=0x57F287,
-                )
-
-                # Small server icon on the left of the title
-                if guild.icon:
-                    _lk_embed.set_author(
-                        name=guild.name,
-                        icon_url=guild.icon.url,
-                    )
-                    _lk_embed.title = None  # author line replaces title
-
-                # Large image below the description text
-                if _lk_custom_img:
-                    _lk_embed.set_image(url=_lk_custom_img)
-                elif guild.banner:
-                    _lk_embed.set_image(url=guild.banner.with_format("png").url)
-
-                # ── Send ───────────────────────────────────────────────────────
-                if _lk_is_channel:
-                    # Channel mention — no external button needed
-                    _lk_embed.add_field(
-                        name="\u200b",
-                        value=f"<#{_lk_url}>",
-                        inline=False,
-                    )
-                    await message.channel.send(embed=_lk_embed)
-                else:
-                    # External URL — "Go to Server" link button below the embed
-                    class _LkGoView(discord.ui.View):
-                        def __init__(self):
-                            super().__init__(timeout=None)
-                            self.add_item(discord.ui.Button(
-                                label=_lk_label,
-                                url=_lk_url,
-                                style=discord.ButtonStyle.link,
-                            ))
-                    await message.channel.send(embed=_lk_embed, view=_LkGoView())
-
+                await message.channel.send(_lk_content)
             except (discord.Forbidden, discord.HTTPException):
                 pass
         return
@@ -17241,19 +17178,14 @@ async def link_cmd(ctx):
     desc_parts.append(f"🟢 {online} Online  •  👥 {total} Members")
     desc_parts.append(f"Est. {est}")
     embed = discord.Embed(
-        title=guild.name if not guild.icon else None,
+        title=guild.name,
         description="\n".join(desc_parts),
         color=0x57F287,
     )
     if guild.icon:
-        embed.set_author(
-            name=guild.name,
-            icon_url=guild.icon.url,
-        )
+        embed.set_thumbnail(url=guild.icon.url)
 
     # ── Image: custom URL takes priority; fall back to guild banner ───────────
-    # Uses set_image (full-width) — NOT set_thumbnail — so the image shows
-    # large below the text instead of as a small icon on the side.
     if _custom_img:
         embed.set_image(url=_custom_img)
     elif guild.banner:
