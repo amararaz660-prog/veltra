@@ -3009,7 +3009,7 @@ async def on_message(message):
                 inline=False
             )
             await message.channel.send(embed=result_embed)
-        return
+            return  # only consume the message when it was a valid T/F answer
 
     if message.channel.id in active_quizzes and not message.content.startswith('!'):
         aq = active_quizzes[message.channel.id]
@@ -3032,7 +3032,7 @@ async def on_message(message):
                 color=discord.Color.green()
             )
             await message.channel.send(embed=win_embed)
-        return
+            return  # only consume the message when the correct answer was given
 
     if message.channel.id in anime_quizzes and not message.content.startswith('!'):
         quiz = anime_quizzes[message.channel.id]
@@ -3058,7 +3058,7 @@ async def on_message(message):
             )
             win_embed.set_thumbnail(url=quiz["image_url"])
             await message.channel.send(embed=win_embed)
-        return
+            return  # only consume the message when the correct answer was given
 
     if message.channel.id in hangman_games and len(message.content.strip()) == 1 and message.content.strip().isalpha():
         game = hangman_games[message.channel.id]
@@ -3088,9 +3088,13 @@ async def on_message(message):
         return
 
     # --- GREENTEA GAME AUTO-GUESS ---
+    # Known no-prefix trigger words must NOT be swallowed by the game engine.
+    _NO_PREFIX_KEYWORDS = {"reklam", "link", "tmo", "untmo", "kick", "ban", "nick"}
     if message.channel.id in greentea_games and not message.content.startswith('!'):
         content = message.content.strip().lower()
-        if content.isalpha():
+        if content in _NO_PREFIX_KEYWORDS:
+            pass  # fall through to the dedicated no-prefix handlers below
+        elif content.isalpha():
             session = greentea_games[message.channel.id]
             cid = message.channel.id
             if len(content) > 1:
@@ -3188,49 +3192,78 @@ async def on_message(message):
 
     # --- NO-PREFIX REKLAM TRIGGER ---
     if message.guild is not None and message.content.strip().lower() == "reklam":
+        # Always delete the trigger message to keep chat clean and avoid double-response clutter
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            pass
+
         _rk_key = (message.guild.id, message.author.id)
         _rk_last = reklam_cooldowns.get(_rk_key, 0)
         if time.time() - _rk_last < 30:
             _rk_left = int(30 - (time.time() - _rk_last))
-            await message.reply(
-                f"⏳ {message.author.mention} تکایە چاوەڕێ بە! | Please wait **{_rk_left}s** before requesting again.",
-                mention_author=False,
-                delete_after=8,
-            )
+            try:
+                await message.channel.send(
+                    f"⏳ {message.author.mention} تکایە چاوەڕێ بە! | Please wait **{_rk_left}s** before requesting again.",
+                    delete_after=8,
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
             return
         reklam_cooldowns[_rk_key] = time.time()
         cfg = get_reklam_settings(message.guild.id)
-        if cfg:
-            ch = message.guild.get_channel(cfg["channel_id"])
-            role = message.guild.get_role(cfg["role_id"])
-            if ch:
-                ping = role.mention if role else ""
-                custom_text = cfg.get("text", "").strip()
-
-                # Bottom text: use custom if set, otherwise the default
-                if custom_text:
-                    bottom = custom_text.replace("{user}", message.author.mention)
-                else:
-                    bottom = (
-                        "تکایە بچنە کەناڵەکەی و وەڵامی بدەنەوە.\n"
-                        "Please go to their channel and help them."
-                    )
-
-                notify = discord.Embed(
-                    color=0xF59E0B,
-                    title="📣 داوای ریکلامی نوێ | New Reklam Request",
-                    description=(
-                        f"{bottom}\n\n"
-                        f"**کات | Time:** <t:{int(message.created_at.timestamp())}:R>"
-                    ),
-                    timestamp=datetime.datetime.utcnow(),
+        if not cfg:
+            try:
+                await message.channel.send(
+                    f"⚙️ {message.author.mention} رێکلام تازە ئامادە نەکراوە. | Reklam channel is not configured yet.",
+                    delete_after=8,
                 )
-                notify.set_thumbnail(url=message.author.display_avatar.url)
-                notify.set_footer(text=message.guild.name)
-                try:
-                    await ch.send(content=ping if ping else None, embed=notify)
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            return
+        ch = message.guild.get_channel(cfg["channel_id"])
+        if not ch:
+            try:
+                await message.channel.send(
+                    f"⚙️ {message.author.mention} کەناڵی ریکلام نەدۆزرایەوە. | Reklam channel not found.",
+                    delete_after=8,
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            return
+        role = message.guild.get_role(cfg["role_id"])
+        ping = role.mention if role else ""
+        custom_text = cfg.get("text", "").strip()
+
+        # Bottom text: use custom if set, otherwise the default
+        if custom_text:
+            bottom = custom_text.replace("{user}", message.author.mention)
+        else:
+            bottom = (
+                f"{message.author.mention} داوای ریکلامی کردووە.\n"
+                "تکایە بچنە کەناڵەکەی و وەڵامی بدەنەوە.\n"
+                "Please go to their channel and help them."
+            )
+
+        notify = discord.Embed(
+            color=0xF59E0B,
+            title="📣 داوای ریکلامی نوێ | New Reklam Request",
+            description=(
+                f"{bottom}\n\n"
+                f"**کات | Time:** <t:{int(message.created_at.timestamp())}:R>"
+            ),
+            timestamp=datetime.datetime.utcnow(),
+        )
+        notify.set_author(
+            name=message.author.display_name,
+            icon_url=message.author.display_avatar.url,
+        )
+        notify.set_thumbnail(url=message.author.display_avatar.url)
+        notify.set_footer(text=message.guild.name)
+        try:
+            await ch.send(content=ping if ping else None, embed=notify)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
         return
 
     # --- NO-PREFIX TAG TRIGGER ---
@@ -3259,6 +3292,11 @@ async def on_message(message):
 
     # --- NO-PREFIX LINK TRIGGER ---
     if message.guild is not None and message.content.strip().lower() == "link":
+        # Delete the trigger word so only the embed remains in chat
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            pass
         _lk_link_row = _get_link_settings(message.guild.id)
         if _lk_link_row:
             _lk_url        = _lk_link_row.get("url") or ""
