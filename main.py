@@ -41,9 +41,6 @@ intents.presences = True  # REQUIRED FOR THE COOL STATUS AFK FEATURE
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 bot_start_time = time.time()
 
-LEVEL_ICONS = {range(1,5):"🌱", range(5,10):"⚡", range(10,20):"🔥", range(20,30):"💎", range(30,50):"👑"}
-def level_icon(lvl):
-    return next((v for k,v in LEVEL_ICONS.items() if lvl in k), "🌟")
 
 
 # 🌍 BILINGUAL LANGUAGE SYSTEM
@@ -511,10 +508,11 @@ def init_db():
             role_id BIGINT
         );
         CREATE TABLE IF NOT EXISTS link_settings (
-            guild_id BIGINT PRIMARY KEY,
-            label TEXT,
-            url TEXT,
-            alignment TEXT DEFAULT 'left'
+            guild_id  BIGINT PRIMARY KEY,
+            label     TEXT,
+            url       TEXT,
+            alignment TEXT DEFAULT 'left',
+            image_url TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS tags (
             guild_id    BIGINT,
@@ -720,7 +718,6 @@ economy = {}
 afk_users = {}
 afk_cooldowns = {}
 reklam_cooldowns = {}  # {(guild_id, user_id): last_used_timestamp}
-level_channels = {}
 welcome_channels = {}
 welcome_embed_settings = {}  # {guild_id: {title,description,color,image_url,thumbnail_url,invite_text,account_text}}
 invite_channels = {}
@@ -801,7 +798,6 @@ afk_go_text_map = {}  # {guild_id: custom "gone AFK" sentence template}
 staff_daily_text_map = {}  # {guild_id: {"title": str, "description": str}}
 staff_daily_channels = {}  # {guild_id: channel_id}  — where daily ping is sent
 staff_daily_roles_map = {}  # {guild_id: [role_id, ...]}  — roles to ping
-level_enabled = {}
 ticket_settings = {}
 open_tickets_map = {}
 open_staff_apps  = {}  # {(guild_id, user_id): channel_id}
@@ -1103,24 +1099,6 @@ def _db_delete_commandshortcut(guild_id: int, shortcut: str):
     except Exception as _e:
         logging.warning("_db_delete_commandshortcut failed: %s", _e)
 
-def load_level_channels():
-    global level_channels
-    level_channels = {}
-    conn = get_db()
-    for row in conn.execute("SELECT guild_id, channel_id FROM level_channels"):
-        level_channels[str(row["guild_id"])] = row["channel_id"]
-    conn.close()
-
-def save_level_channels():
-    conn = get_db()
-    for gid, cid in level_channels.items():
-        conn.execute(
-            "INSERT INTO level_channels (guild_id, channel_id) VALUES (?,?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id",
-            (int(gid), int(cid))
-        )
-    conn.commit()
-    conn.close()
 
 def load_ticket_settings():
     global ticket_settings, open_tickets_map
@@ -2371,19 +2349,6 @@ def add_xp(guild_id, user_id, amount, kind):
 def total_xp(entry):
     return entry.get("message_xp", 0) + entry.get("voice_xp", 0)
 
-def level_from_xp(xp):
-    return int(math.floor(math.sqrt(xp / 100)))
-
-def xp_for_level(level):
-    return (level ** 2) * 100
-
-def make_progress_bar(current, total, length=20):
-    if total <= 0:
-        return "░" * length
-    pct = max(0.0, min(1.0, current / total))
-    filled = int(pct * length)
-    return "█" * filled + "░" * (length - filled)
-
 def humanize_seconds(s):
     s = int(max(0, s))
     if s < 60:
@@ -2397,43 +2362,6 @@ def humanize_seconds(s):
     d, h = divmod(h, 24)
     return f"{d}d {h}h"
 
-def get_level_channel(guild):
-    cid = level_channels.get(str(guild.id))
-    if cid is None:
-        return None
-    return guild.get_channel(int(cid))
-
-async def announce_level_up(member, fallback_channel, new_level, source):
-    target = get_level_channel(member.guild) or fallback_channel
-    if target is None:
-        return
-    color = discord.Color.from_hsv((min(new_level, 50) / 50) * 0.83, 0.90, 1.0)
-    icon = level_icon(new_level)
-    next_xp = xp_for_level(new_level + 1) - xp_for_level(new_level)
-    embed = discord.Embed(
-        title=f"🎉 LEVEL UP! | ئاستت بەرزبووەوە!",
-        description=(
-            f"### {member.mention} reached {icon} **Level {new_level}**!\n"
-            f"گەیشتە {icon} **ئاستی {new_level}**!\n\n"
-            f"{'💬 Earned from chatting | کسبکرا لە پەیامدانەوە' if source == 'message' else '🎙️ Earned in voice chat | کسبکرا لە دەنگدانەوە'}"
-        ),
-        color=color,
-        timestamp=datetime.datetime.utcnow(),
-    )
-    embed.set_author(
-        name=member.display_name,
-        icon_url=member.display_avatar.url if member.display_avatar else None
-    )
-    if member.display_avatar:
-        embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name=f"{icon} Level | ئاست", value=f"**{new_level}**", inline=True)
-    embed.add_field(name="🎯 Next Goal | ئامانجی داهاتوو", value=f"`{next_xp:,}` XP", inline=True)
-    embed.add_field(name="⚡ Keep Going!", value="Chat & voice = more XP\nپەیام و دەنگ = زیاتر XP", inline=True)
-    embed.set_footer(text=f"GG {member.display_name}! ⚡ Keep climbing • بەردەوام بە!")
-    try:
-        await target.send(embed=embed)
-    except (discord.Forbidden, discord.HTTPException):
-        pass
 
 # ─── SELFROLE EMOJI REACTION HELPERS ─────────────────────────────────────────
 
@@ -2498,7 +2426,6 @@ def parse_duration(text):
 load_xp()
 load_warnings()
 load_econ()
-load_level_channels()
 load_welcome_channels()
 load_welcome_embed_settings()
 load_boost_channels()
@@ -3249,21 +3176,15 @@ async def on_message(message):
                     await message.channel.send(embed=e)
             return
 
-    # --- PASSIVE XP ---
+    # --- PASSIVE XP (chat count tracking) ---
     if message.guild is not None and not message.content.startswith(bot.command_prefix):
         key = (message.guild.id, message.author.id)
         now = time.time()
         last = message_cooldowns.get(key, 0)
         if now - last >= MESSAGE_XP_COOLDOWN:
             gained = random.randint(MESSAGE_XP_MIN, MESSAGE_XP_MAX)
-            entry = get_user_entry(message.guild.id, message.author.id)
-            before_total = total_xp(entry)
-            before_level = level_from_xp(before_total)
             add_xp(message.guild.id, message.author.id, gained, "message_xp")
-            after_level = level_from_xp(total_xp(entry))
             message_cooldowns[key] = now
-            if after_level > before_level:
-                await announce_level_up(message.author, message.channel, after_level, "message")
 
     # --- NO-PREFIX REKLAM TRIGGER ---
     if message.guild is not None and message.content.strip().lower() == "reklam":
@@ -4233,20 +4154,14 @@ async def voice_xp_tick():
                 elapsed = now - start
                 if elapsed >= 60:
                     minutes = int(elapsed // 60)
-                    entry = get_user_entry(guild.id, member.id)
-                    before_lvl = level_from_xp(total_xp(entry))
                     add_xp(guild.id, member.id, minutes * VOICE_XP_PER_MINUTE, "voice_xp")
-                    after_lvl = level_from_xp(total_xp(entry))
                     voice_sessions[key] = start + minutes * 60
-                    if after_lvl > before_lvl:
-                        await announce_level_up(member, vc, after_lvl, "voice")
 
 @tasks.loop(minutes=2)
 async def autosave():
     save_xp()
     save_warnings()
     save_econ()
-    save_level_channels()
     save_welcome_channels()
     save_ticket_settings()
     save_open_tickets()
@@ -4504,127 +4419,7 @@ async def clear_error(ctx, error):
     elif isinstance(error, commands.BadArgument) or isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("Usage: $clear <number between 1 and 100> | بەکارهێنان: $clear <ژمارە لە نێوان ١ و ١٠٠>")
 
-# --- LEVELING COMMANDS ---
-
-@bot.command()
-async def rank(ctx, member: discord.Member = None):
-    if ctx.guild is None:
-        await ctx.send("This command can only be used in a server. | ئەم فەرمانە تەنها لە سێرڤەر دەکرێت بەکارهێنرێت.")
-        return
-    member = member or ctx.author
-    entry = get_user_entry(ctx.guild.id, member.id)
-    msg_xp = entry.get("message_xp", 0)
-    voice_xp_val = entry.get("voice_xp", 0)
-    total = msg_xp + voice_xp_val
-    lvl = level_from_xp(total)
-    cur_floor = xp_for_level(lvl)
-    next_floor = xp_for_level(lvl + 1)
-    progress = total - cur_floor
-    needed = next_floor - cur_floor
-    pct = (progress / needed * 100) if needed else 0
-    bar = make_progress_bar(progress, needed, length=20)
-
-    guild_data = xp_data.get(str(ctx.guild.id), {})
-    sorted_users = sorted(
-        guild_data.items(),
-        key=lambda kv: kv[1].get("message_xp", 0) + kv[1].get("voice_xp", 0),
-        reverse=True,
-    )
-    rank_pos = next((i + 1 for i, (uid, _) in enumerate(sorted_users) if uid == str(member.id)), len(sorted_users) + 1)
-
-    icon = level_icon(lvl)
-    color = discord.Color.from_hsv((min(lvl, 50) / 50) * 0.83, 0.90, 1.0)
-    embed = discord.Embed(color=color, timestamp=datetime.datetime.utcnow())
-    embed.set_author(
-        name=f"{member.display_name} — Rank Card | کارتی رتبە",
-        icon_url=member.display_avatar.url if member.display_avatar else None
-    )
-    if member.display_avatar:
-        embed.set_thumbnail(url=member.display_avatar.url)
-    embed.description = (
-        f"## {icon} Level | ئاست  **{lvl}**  ·  🏅 Rank | رتبە  **#{rank_pos}**\n"
-        f"```\n{bar}  {pct:.1f}%\n```\n"
-        f"**{progress:,}** / **{needed:,}** XP  →  Level | ئاستی **{lvl + 1}**"
-    )
-    embed.add_field(name="💬 Message XP | پەیام", value=f"```{msg_xp:,}```", inline=True)
-    embed.add_field(name="🎙️ Voice XP | دەنگ", value=f"```{voice_xp_val:,}```", inline=True)
-    embed.add_field(name="✨ Total XP | کۆی گشتی", value=f"```{total:,}```", inline=True)
-    embed.set_footer(text="Keep chatting & chilling in voice! | بەردەوام بە لە پەیام و دەنگدا!")
-    await ctx.send(embed=embed)
-
-@bot.command(name="toplevel", aliases=["levels", "topleveler", "topup"])
-async def toplevel(ctx):
-    if ctx.guild is None:
-        await ctx.send("This command can only be used in a server. | ئەم فەرمانە تەنها لە سێرڤەر دەکرێت بەکارهێنرێت.")
-        return
-    guild_data = xp_data.get(str(ctx.guild.id), {})
-    rows = []
-    for uid, entry in guild_data.items():
-        total = entry.get("message_xp", 0) + entry.get("voice_xp", 0)
-        if total <= 0:
-            continue
-        rows.append((uid, total, level_from_xp(total)))
-    rows.sort(key=lambda r: (r[2], r[1]), reverse=True)
-    rows = rows[:10]
-    if not rows:
-        await ctx.send("No XP has been earned in this server yet. | هێشتا هیچ XP لەم سێرڤەرە کەسب نەکراوە.")
-        return
-    medals = ["🥇", "🥈", "🥉"]
-    lines = []
-    for i, (uid, total, lvl) in enumerate(rows):
-        m = ctx.guild.get_member(int(uid))
-        name = m.display_name if m else f"User {uid}"
-        cur_floor = xp_for_level(lvl)
-        next_floor = xp_for_level(lvl + 1)
-        bar = make_progress_bar(total - cur_floor, next_floor - cur_floor, length=12)
-        prefix = medals[i] if i < 3 else f"`#{i+1}`"
-        icon = level_icon(lvl)
-        lines.append(f"{prefix} **{name}** — {icon} Lvl **{lvl}** · `{total:,}` XP\n> `{bar}`")
-    embed = discord.Embed(
-        title="🏅 Top Level Climbers | باڵاترین ئاستگرتووان",
-        description="\n\n".join(lines),
-        color=discord.Color.gold(),
-        timestamp=datetime.datetime.utcnow(),
-    )
-    embed.set_footer(text=f"Top 10 of {ctx.guild.name} | بەرزترین ١٠ی {ctx.guild.name}")
-    await ctx.send(embed=embed)
-
-@bot.command(name="setlevelchannel", aliases=["levelchannel"])
-@commands.has_permissions(manage_guild=True)
-async def setlevelchannel(ctx, channel: discord.TextChannel = None):
-    if ctx.guild is None:
-        await ctx.send("Server only. | تەنها لە سێرڤەر.")
-        return
-    target = channel or ctx.channel
-    level_channels[str(ctx.guild.id)] = target.id
-    save_level_channels()
-    await ctx.send(f"✅ Level-up announcements will now be sent in {target.mention}. | ئاگاداریەکانی بەرزبوونی ئاست دێنرێن بۆ {target.mention}.")
-
-@setlevelchannel.error
-async def setlevelchannel_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ مووچەی Manage Server پێویستە. | You need Manage Server permission.")
-    elif isinstance(error, commands.ChannelNotFound):
-        await ctx.send("❌ کەناڵ نەدۆزرایەوە. | Channel not found.")
-
-
-@bot.command(name="removelevelchannel", aliases=["unsetlevelchannel"])
-@commands.has_permissions(manage_guild=True)
-async def removelevelchannel(ctx):
-    if ctx.guild is None:
-        await ctx.send("Server only. | تەنها لە سێرڤەر.")
-        return
-    if str(ctx.guild.id) in level_channels:
-        del level_channels[str(ctx.guild.id)]
-        save_level_channels()
-        await ctx.send("✅ Level-up announcements will fall back to the channel where the level happened. | ئاگاداریەکانی بەرزبوونی ئاست دەگەڕێنەوە بۆ کەناڵی ئەوجا.")
-    else:
-        await ctx.send("No level channel was set. | هیچ کەناڵی ئاست دانەنرابوو.")
-
-@removelevelchannel.error
-async def removelevelchannel_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ مووچەی Manage Server پێویستە. | You need Manage Server permission.")
+# (Leveling system removed — use !topchat and !topvoice instead)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WELCOME EMBED INTERACTIVE SETUP (modals + view)
@@ -6930,11 +6725,9 @@ async def top(ctx, category: str = "total"):
         msg_xp = entry.get("message_xp", 0)
         voice_xp_val = entry.get("voice_xp", 0)
         total = msg_xp + voice_xp_val
-        lvl = level_from_xp(total)
         prefix = medals[i] if i < 3 else f"`#{i + 1}`"
-        icon = level_icon(lvl)
         lines.append(
-            f"{prefix} **{name}** — {icon} Lvl **{lvl}** · `{total:,}` XP\n"
+            f"{prefix} **{name}** · `{total:,}` XP\n"
             f"> 💬 `{msg_xp:,}` · 🎙️ `{voice_xp_val:,}`"
         )
     embed = discord.Embed(
@@ -6945,6 +6738,75 @@ async def top(ctx, category: str = "total"):
     )
     embed.set_footer(text=f"!top total | message | voice  •  {ctx.guild.name}")
     await ctx.send(embed=embed)
+
+
+@bot.command(name="topchat", aliases=["chatleaderboard", "chatlb"])
+async def topchat(ctx):
+    """Show the top 10 members with the most chat messages in this server."""
+    if ctx.guild is None:
+        return await ctx.send("This command can only be used in a server. | ئەم فەرمانە تەنها لە سێرڤەر دەکرێت بەکارهێنرێت.")
+    guild_data = xp_data.get(str(ctx.guild.id), {})
+    rows = [
+        (uid, entry.get("message_xp", 0))
+        for uid, entry in guild_data.items()
+        if entry.get("message_xp", 0) > 0
+    ]
+    rows.sort(key=lambda r: r[1], reverse=True)
+    rows = rows[:10]
+    if not rows:
+        return await ctx.send("هیچ کەس هێشتا پەیامی نەنێردووە. | Nobody has chatted yet.")
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, score) in enumerate(rows):
+        m = ctx.guild.get_member(int(uid))
+        name = m.display_name if m else f"User {uid}"
+        prefix = medals[i] if i < 3 else f"`#{i + 1}`"
+        lines.append(f"{prefix} **{name}** — `{score:,}` chat points")
+    embed = discord.Embed(
+        title="💬 Top Chatters | باڵاترین چاتەران",
+        description="\n".join(lines),
+        color=discord.Color.blue(),
+        timestamp=datetime.datetime.utcnow(),
+    )
+    embed.set_footer(text=f"Top 10 of {ctx.guild.name}")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="topvoice", aliases=["voiceleaderboard", "voicelb"])
+async def topvoice(ctx):
+    """Show the top 10 members who spent the most time in voice channels."""
+    if ctx.guild is None:
+        return await ctx.send("This command can only be used in a server. | ئەم فەرمانە تەنها لە سێرڤەر دەکرێت بەکارهێنرێت.")
+    guild_data = xp_data.get(str(ctx.guild.id), {})
+    rows = [
+        (uid, entry.get("voice_xp", 0))
+        for uid, entry in guild_data.items()
+        if entry.get("voice_xp", 0) > 0
+    ]
+    rows.sort(key=lambda r: r[1], reverse=True)
+    rows = rows[:10]
+    if not rows:
+        return await ctx.send("هیچ کەس هێشتا لە ڤۆیسدا نەبووە. | Nobody has joined voice yet.")
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, score) in enumerate(rows):
+        m = ctx.guild.get_member(int(uid))
+        name = m.display_name if m else f"User {uid}"
+        # Convert voice XP to approximate minutes (VOICE_XP_PER_MINUTE xp per minute)
+        minutes = score // VOICE_XP_PER_MINUTE
+        hours, mins = divmod(minutes, 60)
+        time_str = f"{hours}h {mins}m" if hours else f"{mins}m"
+        prefix = medals[i] if i < 3 else f"`#{i + 1}`"
+        lines.append(f"{prefix} **{name}** — ⏱️ `{time_str}` (`{score:,}` voice pts)")
+    embed = discord.Embed(
+        title="🎙️ Top Voice | باڵاترین ڤۆیسەران",
+        description="\n".join(lines),
+        color=discord.Color.purple(),
+        timestamp=datetime.datetime.utcnow(),
+    )
+    embed.set_footer(text=f"Top 10 of {ctx.guild.name} | Active voice time (muted/deafened doesn't count)")
+    await ctx.send(embed=embed)
+
 
 # --- MODERATION COMMANDS ---
 
@@ -10144,10 +10006,10 @@ HELP_CATEGORIES = [
         ("!oldestmember",                     "First member to join | کۆنترین ئەندام"),
         ("!newestmember",                     "Most recent member | نوێترین ئەندام"),
     ]),
-    ("⭐ Leveling | ئاست", [
-        ("!rank [@member]",                   "View XP rank | ئاست و XP ببینە"),
-        ("!top / !lb",                        "XP leaderboard | تابلۆی پێشەنگان"),
-        ("!toplevel",                         "Level leaderboard | تابلۆی ئاستەکان"),
+    ("💬 Chat & Voice Stats | ئامارەکان", [
+        ("!topchat",                          "Top chatters leaderboard | باڵاترین چاتەران"),
+        ("!topvoice",                         "Top voice members | باڵاترین ڤۆیسەران"),
+        ("!top / !lb",                        "Total activity leaderboard | تابلۆی چالاکی"),
         ("!luckylb",                          "Lucky game leaderboard | تابلۆی یاری بەخت"),
     ]),
     ("🔨 Moderation | کونترۆڵ", [
@@ -10315,12 +10177,6 @@ PANEL_CATEGORIES = [
         ("!removeinviteembed",                   "Remove invite channel | چانێلی بانگهێشت لابدە"),
         ("!testinvite",                          "Preview invite embed in configured channel | تاقیکردنەوەی ئمبیدی بانگهێشت"),
     ]),
-    ("⭐ Leveling Setup | دامەزراندنی ئاست", [
-        ("!setlevelchannel #channel",            "Level-up messages go here — NEEDS: #channel | پەیامی ئاستبالابوون — پێویست: #channel"),
-        ("!removelevelchannel",                  "Remove level-up channel | چانێلی ئاستبالابوون لابدە"),
-        ("!setlevelup #channel [message]",       "Set level-up channel + custom message — NEEDS: #channel | چانێل و پەیامی تایبەت — پێویست: #channel"),
-        ("!startlevelup",                        "Preview level-up announcement | دێمۆی ئاگاداری ئاستبالابوون"),
-    ]),
     ("🎭 Reaction Roles | رۆڵی ئەکتیڤ", [
         ("!reactionrole [#ch] Title | @r | @r",  "Create button-role panel — NEEDS: title + @roles | پانێلی دوگمەی رۆڵ — پێویست: ناو + @رۆڵەکان"),
         ("!setupreaction [#channel] [title]",    "Interactive role setup picker — NEEDS: nothing (guided) | دامەزراندنی ئینتەراکتیڤ — پێویست: هیچ"),
@@ -10487,111 +10343,6 @@ async def helppanel_cmd(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="setlevelup", aliases=["levelupchannel", "setlvlup"])
-@commands.has_permissions(administrator=True)
-async def setlevelup_cmd(ctx, channel: discord.TextChannel = None, *, message: str = None):
-    """Set the channel (and optionally a custom message) for level-up notifications."""
-    if channel is None:
-        e = discord.Embed(
-            title="⚙️ $setlevelup — Usage | بەکارهێنان",
-            description=(
-                "**بەکارهێنان | Usage:** `!setlevelup #channel [custom message]`\n\n"
-                "**نموونە | Examples:**\n"
-                "`!setlevelup #general`\n"
-                "`!setlevelup #levels GG {user} — you hit level {level}! 🎉`\n\n"
-                "**Tags | تاگەکان:**\n"
-                "`{user}` — mention  •  `{level}` — new level  •  `{xp}` — total XP"
-            ),
-            color=discord.Color.blurple(),
-        )
-        return await ctx.send(embed=e)
-
-    gid = str(ctx.guild.id)
-    level_channels[gid] = channel.id
-    save_level_channels()
-
-    custom = message or "{user} بالا چوو بۆ ئاستی **{level}** 🎉 | leveled up to **{level}**! 🎉"
-    # store custom message in bot's memory (use a simple dict)
-    if not hasattr(bot, "_levelup_messages"):
-        bot._levelup_messages = {}
-    bot._levelup_messages[gid] = custom
-
-    e = discord.Embed(
-        title="✅ چانێلی ئاستبالابوون دیاری کرا | Level-up Channel Set",
-        description=(
-            f"📢 چانێل | Channel: {channel.mention}\n"
-            f"💬 پەیام | Message: `{custom}`\n\n"
-            "دوای ئەوەی کەسێک ئاستیان بالا بچێت، ئاگادارکردنەوەکە دەنێردرێت! | "
-            "A notification will be sent whenever someone levels up!"
-        ),
-        color=0x57f287,
-    )
-    e.set_footer(text="!startlevelup بنووسە بۆ دێمۆ | Type $startlevelup for a demo")
-    await ctx.send(embed=e)
-
-
-@setlevelup_cmd.error
-async def setlevelup_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("پێویستت بە مووچەی ئەدمینایتی هەیە. | You need Administrator permission.")
-    elif isinstance(error, commands.ChannelNotFound):
-        await ctx.send("چانێلەکە نەدۆزرایەوە. | Channel not found. Usage: `!setlevelup #channel`")
-
-
-@bot.command(name="startlevelup", aliases=["demoLevelup", "testlevelup"])
-@commands.has_permissions(administrator=True)
-async def startlevelup_cmd(ctx):
-    """Send a demo level-up announcement to the configured level-up channel."""
-    gid = str(ctx.guild.id)
-    cid = level_channels.get(gid)
-    target = ctx.guild.get_channel(cid) if cid else ctx.channel
-    if target is None:
-        target = ctx.channel
-
-    custom_msg = None
-    if hasattr(bot, "_levelup_messages"):
-        custom_msg = bot._levelup_messages.get(gid)
-
-    demo_level = 0
-    demo_xp    = 0
-
-    level_enabled[gid] = True
-
-    if custom_msg:
-        text = (custom_msg
-                .replace("{user}", ctx.author.mention)
-                .replace("{level}", str(demo_level))
-                .replace("{xp}", str(demo_xp)))
-    else:
-        text = f"🚀 سیستەمی ئاست چالاک کرا! | Leveling system is now **active**!\n\n{ctx.author.mention} سیستەمی ئاست دەستی پێکرد بۆ **{ctx.guild.name}** | started the leveling system for **{ctx.guild.name}**!"
-
-    e = discord.Embed(
-        title="⭐ سیستەمی ئاست دەستی پێکرد! | Leveling System Started!",
-        description=text,
-        color=0xfee75c,
-    )
-    e.add_field(name="⭐ ئاستی دەستپێکردن | Starting Level", value=f"**{demo_level}**", inline=True)
-    e.add_field(name="📊 کۆی XP | Total XP",                value=f"**{demo_xp}**",    inline=True)
-    e.add_field(name="💬 چۆن XP بەدەست بهێنیت | How to earn XP",
-                value="پەیام بنێرە `15–25 XP` · دەنگ چالاک بە `10 XP/min`\nSend messages `15–25 XP` · Be active in voice `10 XP/min`",
-                inline=False)
-    e.set_thumbnail(url=ctx.guild.icon.url if ctx.guild.icon else ctx.author.display_avatar.url)
-    e.set_footer(text=f"Started by {ctx.author.display_name} · $rank بنووسە بۆ بینینی ئاستت | Type $rank to see your level")
-
-    await target.send(embed=e)
-    if target != ctx.channel:
-        confirm = discord.Embed(
-            title="✅ سیستەمی ئاست چالاک کرا | Leveling System Active",
-            description=f"ئاگادارییەکە نێردرا بۆ {target.mention} | Announcement sent to {target.mention}",
-            color=0x57f287,
-        )
-        await ctx.send(embed=confirm)
-
-
-@startlevelup_cmd.error
-async def startlevelup_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("پێویستت بە مووچەی ئەدمینایتی هەیە. | You need Administrator permission.")
 
 
 @bot.command()
@@ -11324,7 +11075,12 @@ class TicketPanelView(discord.ui.View):
 
             # ── Send welcome message (wrapped — never let this crash the interaction) ──
             try:
-                await ticket_ch.send(content=mention_str, embed=ticket_embed, view=TicketControlView())
+                await ticket_ch.send(
+                    content=mention_str,
+                    embed=ticket_embed,
+                    view=TicketControlView(),
+                    allowed_mentions=discord.AllowedMentions(roles=True, users=True),
+                )
             except (discord.Forbidden, discord.HTTPException):
                 pass  # channel exists, message failed — still show the link
 
@@ -11460,7 +11216,12 @@ class TicketPanelView(discord.ui.View):
                 mention_str += " <@&" + str(staff_rid) + ">"
 
             try:
-                await app_ch.send(content=mention_str, embed=app_embed, view=StaffAppControlView())
+                await app_ch.send(
+                    content=mention_str,
+                    embed=app_embed,
+                    view=StaffAppControlView(),
+                    allowed_mentions=discord.AllowedMentions(roles=True, users=True),
+                )
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
@@ -11523,6 +11284,69 @@ class TicketProblemModal(discord.ui.Modal, title="📝 Submit Problem | کێشە
             pass
 
 
+class TicketAssignView(discord.ui.View):
+    """A quick view that lets staff tag a member AND a role inside the ticket channel."""
+    def __init__(self):
+        super().__init__(timeout=120)
+        self._member: discord.Member | None = None
+        self._role: discord.Role | None = None
+
+    @discord.ui.select(
+        cls=discord.ui.UserSelect,
+        placeholder="👤 Select a person to assign | کەسێک هەڵبژێرە",
+        min_values=0,
+        max_values=1,
+        custom_id="ticket:assign_user_select",
+        row=0,
+    )
+    async def select_user(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        self._member = select.values[0] if select.values else None
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        cls=discord.ui.RoleSelect,
+        placeholder="🎭 Select a role to notify | رۆڵێک هەڵبژێرە",
+        min_values=0,
+        max_values=1,
+        custom_id="ticket:assign_role_select",
+        row=1,
+    )
+    async def select_role(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        self._role = select.values[0] if select.values else None
+        await interaction.response.defer()
+
+    @discord.ui.button(
+        label="✅ Confirm & Tag | دووپاتکردنەوە و تاگکردن",
+        style=discord.ButtonStyle.success,
+        custom_id="ticket:assign_confirm",
+        row=2,
+    )
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        parts = []
+        if self._member:
+            parts.append(self._member.mention)
+        if self._role:
+            parts.append(self._role.mention)
+        if not parts:
+            return await interaction.response.send_message(
+                "❌ تکایە کەسێک یان رۆڵێک هەڵبژێرە. | Please select a person or role first.",
+                ephemeral=True,
+            )
+        embed = discord.Embed(
+            color=0x5865F2,
+            title="📌 Ticket Assigned | تیکەت دابەشکرا",
+            description="\n".join(parts),
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed.set_footer(text=f"Assigned by {interaction.user.display_name}")
+        await interaction.response.send_message(
+            content=" ".join(parts),
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(roles=True, users=True),
+        )
+        self.stop()
+
+
 class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -11565,6 +11389,35 @@ class TicketControlView(discord.ui.View):
                 )
             except Exception:
                 pass
+
+    @discord.ui.button(
+        label="📌 Assign | دابەشکردن",
+        style=discord.ButtonStyle.blurple,
+        custom_id="ticket:assign",
+        row=1,
+    )
+    async def assign_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Only staff/admins can use this
+        cfg = get_ticket_cfg(interaction.guild.id)
+        staff_rid = cfg.get("staff_role_id")
+        is_staff = (
+            interaction.user.guild_permissions.administrator
+            or interaction.user.guild_permissions.manage_messages
+        )
+        if staff_rid and not is_staff:
+            staff_role = interaction.guild.get_role(int(staff_rid))
+            if staff_role and staff_role in interaction.user.roles:
+                is_staff = True
+        if not is_staff:
+            return await interaction.response.send_message(
+                "❌ تەنها ستاف دەتوانێت ئەم بەشە بەکاربێنێت. | Only staff can assign tickets.",
+                ephemeral=True,
+            )
+        await interaction.response.send_message(
+            "📌 **کەس و رۆڵی پێویست هەڵبژێرە پاشان Confirm بکە | Select person & role then confirm:**",
+            view=TicketAssignView(),
+            ephemeral=True,
+        )
 
 
 @bot.command(name="closeticket", aliases=["close"])
@@ -17002,26 +16855,41 @@ async def autorole_cmd(ctx):
 
 def _get_link_settings(guild_id: int):
     with get_db() as _conn:
-        # migrate: add alignment column if missing
-        try:
-            _conn.execute("ALTER TABLE link_settings ADD COLUMN alignment TEXT DEFAULT 'left'")
-            _conn.commit()
-        except Exception:
-            pass
+        # migrate: add columns if missing (safe on re-run)
+        for _col, _default in (("alignment", "'left'"), ("image_url", "''")):
+            try:
+                _conn.execute(f"ALTER TABLE link_settings ADD COLUMN {_col} TEXT DEFAULT {_default}")
+                _conn.commit()
+            except Exception:
+                pass
         row = _conn.execute(
-            "SELECT label, url, alignment FROM link_settings WHERE guild_id=?", (guild_id,)
+            "SELECT label, url, alignment, image_url FROM link_settings WHERE guild_id=?", (guild_id,)
         ).fetchone()
     return dict(row) if row else None
 
-def _save_link_settings(guild_id: int, label: str, url: str, alignment: str = "left"):
+def _save_link_settings(guild_id: int, label: str, url: str, alignment: str = "left", image_url: str = ""):
     alignment = alignment.strip().lower()
     if alignment not in ("left", "center", "right"):
         alignment = "left"
+    image_url = (image_url or "").strip()
     with get_db() as _conn:
         _conn.execute(
-            "INSERT INTO link_settings (guild_id, label, url, alignment) VALUES (?,?,?,?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET label=excluded.label, url=excluded.url, alignment=excluded.alignment",
-            (guild_id, label, url, alignment)
+            "INSERT INTO link_settings (guild_id, label, url, alignment, image_url) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET "
+            "label=excluded.label, url=excluded.url, alignment=excluded.alignment, image_url=excluded.image_url",
+            (guild_id, label, url, alignment, image_url)
+        )
+        _conn.commit()
+
+def _save_link_image(guild_id: int, image_url: str):
+    """Update only the image_url for an existing link row."""
+    image_url = (image_url or "").strip()
+    with get_db() as _conn:
+        # ensure row exists before updating
+        _conn.execute(
+            "INSERT INTO link_settings (guild_id, label, url, alignment, image_url) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET image_url=excluded.image_url",
+            (guild_id, "", "", "left", image_url)
         )
         _conn.commit()
 
@@ -17034,12 +16902,15 @@ def _build_link_panel_embed(guild, link):
     """Build the main !setuplink panel embed showing current settings."""
     if link:
         _purl = link['url']
-        _pdisplay = f"<#{_purl}>" if _purl.isdigit() else _purl
+        _pdisplay = f"<#{_purl}>" if (_purl or "").isdigit() else (_purl or "❌ not set")
         _align = (link.get('alignment') or 'left').capitalize()
+        _img = link.get('image_url') or ''
+        img_line = f"\n**🖼️ Image:** `{_img}`" if _img else "\n**🖼️ Image:** ❌ not set"
         current = (
             f"**📝 ناو | Label:** `{link['label']}`\n"
             f"**🔗 لینک / Channel:** {_pdisplay}\n"
             f"**↔️ Alignment:** `{_align}`"
+            f"{img_line}"
         )
     else:
         current = "❌ ھیچ لینکەک دانەنراوە. | No link set yet."
@@ -17054,6 +16925,11 @@ def _build_link_panel_embed(guild, link):
             "━━━━━━━━━━━━━━━━━━━━━━━━━"
         ),
     )
+    # Show the image preview inside the setup panel itself
+    if link:
+        _img = link.get('image_url') or ''
+        if _img:
+            embed.set_image(url=_img)
     embed.set_footer(
         text=f"{guild.name} · !link بنووسە بۆ پیشاندانی لینک | Type !link to show it",
         icon_url=guild.icon.url if guild.icon else None,
@@ -17103,8 +16979,46 @@ class LinkEditModal(discord.ui.Modal, title="🔗 دانانی لینک | Set Li
         alignment = self.link_alignment.value.strip().lower() or "left"
         if alignment not in ("left", "center", "right"):
             alignment = "left"
+        # preserve any existing image_url
+        existing  = _get_link_settings(self.guild_id)
+        image_url = (existing or {}).get("image_url") or ""
         # Allow ANY text — URL, channel ID, or rich Discord-formatted text
-        _save_link_settings(self.guild_id, label, url, alignment)
+        _save_link_settings(self.guild_id, label, url, alignment, image_url)
+        link = _get_link_settings(self.guild_id)
+        new_embed = _build_link_panel_embed(interaction.guild, link)
+        await interaction.response.edit_message(embed=new_embed, view=self.parent_view)
+
+
+# ── Image Modal ────────────────────────────────────────────────────────────────
+
+class LinkImageModal(discord.ui.Modal, title="🖼️ دانانی وێنە | Set Image"):
+    """Modal for entering an image URL to display with !link."""
+
+    image_url = discord.ui.TextInput(
+        label="Image URL (https://...)",
+        placeholder="https://i.imgur.com/example.png",
+        max_length=2000,
+        required=True,
+        style=discord.TextStyle.long,
+    )
+
+    def __init__(self, guild_id: int, view: "LinkSetupView"):
+        super().__init__()
+        self.guild_id = guild_id
+        self.parent_view = view
+        existing = _get_link_settings(guild_id)
+        if existing and existing.get("image_url"):
+            self.image_url.default = existing["image_url"]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        url = self.image_url.value.strip()
+        if url and not url.startswith(("http://", "https://")):
+            return await interaction.response.send_message(
+                "❌ URLێکی دروست بنووسە کە بە `http://` یان `https://` دەست پێدەکات. | "
+                "Please enter a valid URL starting with `http://` or `https://`.",
+                ephemeral=True,
+            )
+        _save_link_image(self.guild_id, url)
         link = _get_link_settings(self.guild_id)
         new_embed = _build_link_panel_embed(interaction.guild, link)
         await interaction.response.edit_message(embed=new_embed, view=self.parent_view)
@@ -17113,7 +17027,7 @@ class LinkEditModal(discord.ui.Modal, title="🔗 دانانی لینک | Set Li
 # ── View ───────────────────────────────────────────────────────────────────────
 
 class LinkSetupView(discord.ui.View):
-    """Interactive panel for !setuplink with 3 buttons."""
+    """Interactive panel for !setuplink with 5 buttons."""
 
     def __init__(self, guild_id: int):
         super().__init__(timeout=300)
@@ -17134,6 +17048,23 @@ class LinkSetupView(discord.ui.View):
                 await interaction.response.send_message(f"❌ هەڵە | Error: {e}", ephemeral=True)
             except Exception:
                 await interaction.followup.send(f"❌ هەڵە | Error: {e}", ephemeral=True)
+
+    @discord.ui.button(
+        label="🖼️ دانانی وێنە | Set Image",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def btn_set_image(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not (interaction.user.guild_permissions.manage_guild or interaction.user == interaction.guild.owner):
+            return await interaction.response.send_message("❌ مووچەی Manage Server پێویستە. | You need Manage Server permission.", ephemeral=True)
+        try:
+            await interaction.response.send_modal(LinkImageModal(self.guild_id, self))
+        except Exception as e:
+            try:
+                await interaction.response.send_message(f"❌ هەڵە | Error: {e}", ephemeral=True)
+            except Exception:
+                await interaction.followup.send(f"❌ هەڵە | Error: {e}", ephemeral=True)
+
     @discord.ui.button(
         label="🔗 سەیرکردنی لینکی ئێستا | View Current Link",
         style=discord.ButtonStyle.secondary,
@@ -17148,8 +17079,27 @@ class LinkSetupView(discord.ui.View):
             )
         else:
             _vurl = link['url']
-            _vcontent = f"<#{_vurl}>" if _vurl.isdigit() else _vurl
+            _vcontent = f"<#{_vurl}>" if (_vurl or "").isdigit() else (_vurl or "❌ not set")
             await interaction.response.send_message(_vcontent, ephemeral=True)
+
+    @discord.ui.button(
+        label="🗑️ سڕینەوەی وێنە | Remove Image",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def btn_remove_image(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not (interaction.user.guild_permissions.manage_guild or interaction.user == interaction.guild.owner):
+            return await interaction.response.send_message("❌ مووچەی Manage Server پێویستە. | You need Manage Server permission.", ephemeral=True)
+        link = _get_link_settings(self.guild_id)
+        if not link or not link.get("image_url"):
+            return await interaction.response.send_message(
+                "❌ هیچ وێنەیەک دانەنراوە. | No image is set.", ephemeral=True
+            )
+        _save_link_image(self.guild_id, "")
+        link = _get_link_settings(self.guild_id)
+        new_embed = _build_link_panel_embed(interaction.guild, link)
+        await interaction.response.edit_message(embed=new_embed, view=self)
+        await interaction.followup.send("✅ وێنەکە سڕدرایەوە. | Image removed.", ephemeral=True)
 
     @discord.ui.button(
         label="🗑️ سڕینەوەی لینک | Remove Link",
@@ -17195,16 +17145,23 @@ async def link_cmd(ctx):
     link_row = _get_link_settings(ctx.guild.id)
     if not link_row:
         return await ctx.send("❌ هیچ لینکێک دانەنراوە. ئادمینەکان `!setuplink` بەکاربھێنن.")
-    _url        = link_row["url"]
-    _label      = link_row.get("label") or "🔗 Link"
-    _alignment  = (link_row.get("alignment") or "left").lower()
-    _is_url     = _url.startswith(("http://", "https://"))
-    _is_channel = _url.isdigit()
+    _url         = link_row["url"] or ""
+    _label       = link_row.get("label") or "🔗 Link"
+    _alignment   = (link_row.get("alignment") or "left").lower()
+    _custom_img  = (link_row.get("image_url") or "").strip()
+    _is_url      = _url.startswith(("http://", "https://"))
+    _is_channel  = _url.isdigit()
     _is_freeform = not _is_url and not _is_channel
 
     # ── Free-form Discord-markdown text — send as raw message ─────────────────
     if _is_freeform:
-        await ctx.send(_url)
+        if _custom_img:
+            # still show the image even for freeform text
+            _fi_embed = discord.Embed(description=_url, color=0x57F287)
+            _fi_embed.set_image(url=_custom_img)
+            await ctx.send(embed=_fi_embed)
+        else:
+            await ctx.send(_url)
         return
 
     guild = ctx.guild
@@ -17227,7 +17184,11 @@ async def link_cmd(ctx):
     )
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
-    if guild.banner:
+
+    # ── Image: custom URL takes priority; fall back to guild banner ───────────
+    if _custom_img:
+        embed.set_image(url=_custom_img)
+    elif guild.banner:
         embed.set_image(url=guild.banner.with_format("png").url)
 
     # ── apply alignment ───────────────────────────────────────────────────────
