@@ -12079,10 +12079,9 @@ class ShopTicketPanelView(discord.ui.View):
                 shop_role_ids,
             )
 
+            # Only ping the user + explicitly selected shop roles (not all admin roles)
             mention_str = interaction.user.mention
             for rid in shop_role_ids:
-                mention_str += " <@&" + str(rid) + ">"
-            for rid in admin_role_ids:
                 mention_str += " <@&" + str(rid) + ">"
 
             try:
@@ -12159,7 +12158,17 @@ class ShopTicketControlView(discord.ui.View):
     async def close_shop_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         if not guild:
-            return await interaction.response.send_message("❌ Server only.", ephemeral=True)
+            try:
+                await interaction.response.send_message("❌ Server only.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        # Defer immediately so the interaction never times out
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
 
         key = None
         for (gid, uid), cid in list(open_shop_tickets_map.items()):
@@ -12168,9 +12177,11 @@ class ShopTicketControlView(discord.ui.View):
                 break
 
         if key is None:
-            return await interaction.response.send_message(
-                "❌ This is not a shop ticket channel.", ephemeral=True
-            )
+            try:
+                await interaction.followup.send("❌ This is not a shop ticket channel.", ephemeral=True)
+            except Exception:
+                pass
+            return
 
         gid, uid = key
         is_owner = str(interaction.user.id) == uid
@@ -12186,24 +12197,29 @@ class ShopTicketControlView(discord.ui.View):
                 break
 
         if not (is_owner or is_staff):
-            return await interaction.response.send_message(
-                "❌ Only the ticket owner or shop staff can close this ticket.", ephemeral=True
-            )
+            try:
+                await interaction.followup.send(
+                    "❌ Only the ticket owner or shop staff can close this ticket.", ephemeral=True
+                )
+            except Exception:
+                pass
+            return
 
         try:
-            await interaction.response.send_message("🔒 Closing shop ticket in 5 seconds...")
+            await interaction.followup.send("🔒 Closing shop ticket in 5 seconds...")
         except Exception:
             pass
 
         open_shop_tickets_map.pop(key, None)
         save_open_shop_tickets()
+        channel_ref = interaction.channel
         await shop_ticket_log(
             guild,
-            "🔒 **Shop ticket closed** " + interaction.channel.mention + " by " + interaction.user.mention,
+            "🔒 **Shop ticket closed** " + channel_ref.mention + " by " + interaction.user.mention,
         )
         await asyncio.sleep(5)
         try:
-            await interaction.channel.delete(reason="Shop ticket closed")
+            await channel_ref.delete(reason="Shop ticket closed")
         except (discord.Forbidden, discord.HTTPException):
             pass
 
@@ -12789,7 +12805,7 @@ def _build_giveaway_embed(
             color=0xED4245,
             timestamp=datetime.datetime.utcnow(),
         )
-        embed.add_field(name="🎁 Prize", value=prize, inline=True)
+        embed.add_field(name="🎁 Prize", value=f"**{prize}**", inline=True)
         embed.add_field(
             name="🕐 Ended",
             value=end_time.strftime("%m/%d/%Y, %I:%M:%S %p"),
@@ -12807,15 +12823,18 @@ def _build_giveaway_embed(
             color=0xFFD700,
             timestamp=end_time,
         )
-        embed.add_field(name="🎁 Prize", value=prize, inline=True)
+        embed.add_field(name="🎁 Prize", value=f"**{prize}**", inline=True)
         embed.add_field(name="🏆 Winners", value=str(winners_count), inline=True)
         embed.add_field(name="🕐 Ends", value=f"<t:{int(end_time.timestamp())}:R>", inline=True)
         embed.add_field(name="🏠 Hosted By", value=host.mention, inline=False)
         embed.set_footer(text=f"React with {GIVEAWAY_EMOJI} to enter!")
-    if host.display_avatar:
+    # Use guild server icon as thumbnail; fall back to host avatar
+    guild_icon = getattr(getattr(host, "guild", None), "icon", None)
+    if guild_icon:
+        embed.set_thumbnail(url=guild_icon.url)
+    elif host.display_avatar:
         embed.set_thumbnail(url=host.display_avatar.url)
     return embed
-
 
 
 async def _end_giveaway(message_id: int, channel: discord.TextChannel):
@@ -12840,10 +12859,12 @@ async def _end_giveaway(message_id: int, channel: discord.TextChannel):
     )
     await msg.edit(embed=ended_embed)
     if winners:
-        winner_mentions = " ".join(w.mention for w in winners)
+        if len(winners) == 1:
+            winner_mentions = winners[0].mention
+        else:
+            winner_mentions = ", ".join(w.mention for w in winners[:-1]) + " and " + winners[-1].mention
         await channel.send(
-            f"🎊 Congratulations {winner_mentions}! You won **{data['prize']}**!\n"
-            f"> [Jump to giveaway]({msg.jump_url})"
+            f"Congratulations {winner_mentions}, you have won **{data['prize']}** 🎉, Hosted By {data['host'].mention} ✨"
         )
     else:
         await channel.send(
