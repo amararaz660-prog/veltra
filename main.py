@@ -17241,14 +17241,19 @@ async def link_cmd(ctx):
     desc_parts.append(f"🟢 {online} Online  •  👥 {total} Members")
     desc_parts.append(f"Est. {est}")
     embed = discord.Embed(
-        title=guild.name,
+        title=guild.name if not guild.icon else None,
         description="\n".join(desc_parts),
         color=0x57F287,
     )
     if guild.icon:
-        embed.set_thumbnail(url=guild.icon.url)
+        embed.set_author(
+            name=guild.name,
+            icon_url=guild.icon.url,
+        )
 
     # ── Image: custom URL takes priority; fall back to guild banner ───────────
+    # Uses set_image (full-width) — NOT set_thumbnail — so the image shows
+    # large below the text instead of as a small icon on the side.
     if _custom_img:
         embed.set_image(url=_custom_img)
     elif guild.banner:
