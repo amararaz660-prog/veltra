@@ -3287,48 +3287,10 @@ async def on_message(message):
         return
 
     # --- NO-PREFIX LINK TRIGGER ---
-    # Type "link" (no prefix needed) to show the configured server link.
+    # Typing "link" (no ! needed) runs exactly the same as !link.
     if message.guild is not None and message.content.strip().lower() == "link":
-        try:
-            _lk_row = _get_link_settings(message.guild.id)
-            if not _lk_row:
-                return
-            _lk_url   = (_lk_row.get("url") or "").strip()
-            _lk_label = (_lk_row.get("label") or "Go to Server").strip() or "Go to Server"
-            if not _lk_url:
-                return
-
-            # Always ensure the URL has a scheme so Discord accepts it as a button URL
-            if not _lk_url.startswith(("http://", "https://")) and not _lk_url.isdigit():
-                _lk_url = "https://" + _lk_url
-
-            guild = message.guild
-
-            # Build a clean embed — server name + member count
-            _lk_embed = discord.Embed(color=0x57F287)
-            if guild.icon:
-                _lk_embed.set_author(name=guild.name, icon_url=guild.icon.url)
-            else:
-                _lk_embed.set_author(name=guild.name)
-            _lk_embed.description = f"👥 **{guild.member_count or 0}** Members"
-
-            # Channel ID → show as mention
-            if _lk_url.isdigit():
-                _lk_embed.add_field(name="\u200b", value=f"<#{_lk_url}>", inline=False)
-                await message.channel.send(embed=_lk_embed)
-            else:
-                # URL → clickable button (no image button, no extra complexity)
-                _lk_view = discord.ui.View(timeout=None)
-                _lk_view.add_item(discord.ui.Button(
-                    label=_lk_label[:80],
-                    url=_lk_url,
-                    style=discord.ButtonStyle.link,
-                ))
-                await message.channel.send(embed=_lk_embed, view=_lk_view)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-        except Exception as _lk_err:
-            logging.warning("link trigger error: %s", _lk_err)
+        message.content = "!link"
+        await bot.process_commands(message)
         return
 
     # --- NO-PREFIX TAG TRIGGER ---
