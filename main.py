@@ -3009,7 +3009,7 @@ async def on_message(message):
                 inline=False
             )
             await message.channel.send(embed=result_embed)
-            return  # only consume the message when it was a valid T/F answer
+        return
 
     if message.channel.id in active_quizzes and not message.content.startswith('!'):
         aq = active_quizzes[message.channel.id]
@@ -3032,7 +3032,7 @@ async def on_message(message):
                 color=discord.Color.green()
             )
             await message.channel.send(embed=win_embed)
-            return  # only consume the message when the correct answer was given
+        return
 
     if message.channel.id in anime_quizzes and not message.content.startswith('!'):
         quiz = anime_quizzes[message.channel.id]
@@ -3058,7 +3058,7 @@ async def on_message(message):
             )
             win_embed.set_thumbnail(url=quiz["image_url"])
             await message.channel.send(embed=win_embed)
-            return  # only consume the message when the correct answer was given
+        return
 
     if message.channel.id in hangman_games and len(message.content.strip()) == 1 and message.content.strip().isalpha():
         game = hangman_games[message.channel.id]
@@ -3088,13 +3088,9 @@ async def on_message(message):
         return
 
     # --- GREENTEA GAME AUTO-GUESS ---
-    # Known no-prefix trigger words must NOT be swallowed by the game engine.
-    _NO_PREFIX_KEYWORDS = {"reklam", "link", "tmo", "untmo", "kick", "ban", "nick"}
     if message.channel.id in greentea_games and not message.content.startswith('!'):
         content = message.content.strip().lower()
-        if content in _NO_PREFIX_KEYWORDS:
-            pass  # fall through to the dedicated no-prefix handlers below
-        elif content.isalpha():
+        if content.isalpha():
             session = greentea_games[message.channel.id]
             cid = message.channel.id
             if len(content) > 1:
@@ -3192,78 +3188,49 @@ async def on_message(message):
 
     # --- NO-PREFIX REKLAM TRIGGER ---
     if message.guild is not None and message.content.strip().lower() == "reklam":
-        # Always delete the trigger message to keep chat clean and avoid double-response clutter
-        try:
-            await message.delete()
-        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
-            pass
-
         _rk_key = (message.guild.id, message.author.id)
         _rk_last = reklam_cooldowns.get(_rk_key, 0)
         if time.time() - _rk_last < 30:
             _rk_left = int(30 - (time.time() - _rk_last))
-            try:
-                await message.channel.send(
-                    f"⏳ {message.author.mention} تکایە چاوەڕێ بە! | Please wait **{_rk_left}s** before requesting again.",
-                    delete_after=8,
-                )
-            except (discord.Forbidden, discord.HTTPException):
-                pass
+            await message.reply(
+                f"⏳ {message.author.mention} تکایە چاوەڕێ بە! | Please wait **{_rk_left}s** before requesting again.",
+                mention_author=False,
+                delete_after=8,
+            )
             return
         reklam_cooldowns[_rk_key] = time.time()
         cfg = get_reklam_settings(message.guild.id)
-        if not cfg:
-            try:
-                await message.channel.send(
-                    f"⚙️ {message.author.mention} رێکلام تازە ئامادە نەکراوە. | Reklam channel is not configured yet.",
-                    delete_after=8,
-                )
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            return
-        ch = message.guild.get_channel(cfg["channel_id"])
-        if not ch:
-            try:
-                await message.channel.send(
-                    f"⚙️ {message.author.mention} کەناڵی ریکلام نەدۆزرایەوە. | Reklam channel not found.",
-                    delete_after=8,
-                )
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            return
-        role = message.guild.get_role(cfg["role_id"])
-        ping = role.mention if role else ""
-        custom_text = cfg.get("text", "").strip()
+        if cfg:
+            ch = message.guild.get_channel(cfg["channel_id"])
+            role = message.guild.get_role(cfg["role_id"])
+            if ch:
+                ping = role.mention if role else ""
+                custom_text = cfg.get("text", "").strip()
 
-        # Bottom text: use custom if set, otherwise the default
-        if custom_text:
-            bottom = custom_text.replace("{user}", message.author.mention)
-        else:
-            bottom = (
-                f"{message.author.mention} داوای ریکلامی کردووە.\n"
-                "تکایە بچنە کەناڵەکەی و وەڵامی بدەنەوە.\n"
-                "Please go to their channel and help them."
-            )
+                # Bottom text: use custom if set, otherwise the default
+                if custom_text:
+                    bottom = custom_text.replace("{user}", message.author.mention)
+                else:
+                    bottom = (
+                        "تکایە بچنە کەناڵەکەی و وەڵامی بدەنەوە.\n"
+                        "Please go to their channel and help them."
+                    )
 
-        notify = discord.Embed(
-            color=0xF59E0B,
-            title="📣 داوای ریکلامی نوێ | New Reklam Request",
-            description=(
-                f"{bottom}\n\n"
-                f"**کات | Time:** <t:{int(message.created_at.timestamp())}:R>"
-            ),
-            timestamp=datetime.datetime.utcnow(),
-        )
-        notify.set_author(
-            name=message.author.display_name,
-            icon_url=message.author.display_avatar.url,
-        )
-        notify.set_thumbnail(url=message.author.display_avatar.url)
-        notify.set_footer(text=message.guild.name)
-        try:
-            await ch.send(content=ping if ping else None, embed=notify)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
+                notify = discord.Embed(
+                    color=0xF59E0B,
+                    title="📣 داوای ریکلامی نوێ | New Reklam Request",
+                    description=(
+                        f"{bottom}\n\n"
+                        f"**کات | Time:** <t:{int(message.created_at.timestamp())}:R>"
+                    ),
+                    timestamp=datetime.datetime.utcnow(),
+                )
+                notify.set_thumbnail(url=message.author.display_avatar.url)
+                notify.set_footer(text=message.guild.name)
+                try:
+                    await ch.send(content=ping if ping else None, embed=notify)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
         return
 
     # --- NO-PREFIX TAG TRIGGER ---
@@ -3292,13 +3259,80 @@ async def on_message(message):
 
     # --- NO-PREFIX LINK TRIGGER ---
     if message.guild is not None and message.content.strip().lower() == "link":
-        # Delete the trigger word so only the embed remains in chat
-        try:
-            await message.delete()
-        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
-            pass
-        # Delegate to the shared helper — same output as !link
-        await _do_send_link(message.channel, message.guild)
+        _lk_link_row = _get_link_settings(message.guild.id)
+        if _lk_link_row:
+            _lk_url        = _lk_link_row.get("url") or ""
+            _lk_label      = _lk_link_row.get("label") or "Go to Server"
+            _lk_custom_img = (_lk_link_row.get("image_url") or "").strip()
+            _lk_is_url     = _lk_url.startswith(("http://", "https://"))
+            _lk_is_channel = _lk_url.isdigit()
+
+            try:
+                guild = message.guild
+
+                # ── Server info lines ──────────────────────────────────────────
+                try:
+                    _lk_online = sum(
+                        1 for m in guild.members
+                        if m.status != discord.Status.offline and not m.bot
+                    )
+                except Exception:
+                    _lk_online = 0
+                _lk_total = guild.member_count or 0
+                _lk_est   = guild.created_at.strftime("%B %Y")
+
+                _lk_desc_parts = []
+                if guild.description:
+                    _lk_desc_parts.append(guild.description)
+                _lk_desc_parts.append(
+                    f"🟢 **{_lk_online}** Online  •  👥 **{_lk_total}** Members"
+                )
+                _lk_desc_parts.append(f"Est. {_lk_est}")
+
+                # ── Build embed: title → description → image → button ─────────
+                _lk_embed = discord.Embed(
+                    title=guild.name,
+                    description="\n".join(_lk_desc_parts),
+                    color=0x57F287,
+                )
+
+                # Small server icon on the left of the title
+                if guild.icon:
+                    _lk_embed.set_author(
+                        name=guild.name,
+                        icon_url=guild.icon.url,
+                    )
+                    _lk_embed.title = None  # author line replaces title
+
+                # Large image below the description text
+                if _lk_custom_img:
+                    _lk_embed.set_image(url=_lk_custom_img)
+                elif guild.banner:
+                    _lk_embed.set_image(url=guild.banner.with_format("png").url)
+
+                # ── Send ───────────────────────────────────────────────────────
+                if _lk_is_channel:
+                    # Channel mention — no external button needed
+                    _lk_embed.add_field(
+                        name="\u200b",
+                        value=f"<#{_lk_url}>",
+                        inline=False,
+                    )
+                    await message.channel.send(embed=_lk_embed)
+                else:
+                    # External URL — "Go to Server" link button below the embed
+                    class _LkGoView(discord.ui.View):
+                        def __init__(self):
+                            super().__init__(timeout=None)
+                            self.add_item(discord.ui.Button(
+                                label=_lk_label,
+                                url=_lk_url,
+                                style=discord.ButtonStyle.link,
+                            ))
+                    await message.channel.send(embed=_lk_embed, view=_LkGoView())
+
+            except (discord.Forbidden, discord.HTTPException):
+                pass
         return
 
     # --- GCREATE INTERACTIVE SESSION ---
@@ -16965,7 +16999,7 @@ def _build_link_panel_embed(guild, link):
         if _img:
             embed.set_image(url=_img)
     embed.set_footer(
-        text=f"{guild.name} · `link` بنووسە بۆ پیشاندانی لینک | Type `link` to show it",
+        text=f"{guild.name} · !link بنووسە بۆ پیشاندانی لینک | Type !link to show it",
         icon_url=guild.icon.url if guild.icon else None,
     )
     return embed
@@ -17172,25 +17206,13 @@ async def setuplink_error(ctx, error):
         await ctx.send("❌ مووچەی Manage Server پێویستە. | You need Manage Server permission.")
 
 
-async def _do_send_link(channel: discord.TextChannel, guild: discord.Guild):
-    """Shared helper: fetch link settings and send the link embed to *channel*.
-
-    Used by both the no-prefix trigger (`link`) and the `!link` command so both
-    paths always produce identical output.
-    Returns True if a message was sent, False if nothing is configured.
-    """
-    link_row = _get_link_settings(guild.id)
+@bot.command(name="link")
+async def link_cmd(ctx):
+    if ctx.guild is None:
+        return await ctx.send("سەروونێ تەنھا لە سێرڤەر | Server only.")
+    link_row = _get_link_settings(ctx.guild.id)
     if not link_row:
-        try:
-            await channel.send(
-                "❌ هیچ لینکێک دانەنراوە. ئادمینەکان `!setuplink` بەکاربھێنن. | "
-                "No link configured yet. Admins, use `!setuplink`.",
-                delete_after=8,
-            )
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-        return False
-
+        return await ctx.send("❌ هیچ لینکێک دانەنراوە. ئادمینەکان `!setuplink` بەکاربھێنن.")
     _url         = link_row["url"] or ""
     _label       = link_row.get("label") or "🔗 Link"
     _alignment   = (link_row.get("alignment") or "left").lower()
@@ -17199,20 +17221,19 @@ async def _do_send_link(channel: discord.TextChannel, guild: discord.Guild):
     _is_channel  = _url.isdigit()
     _is_freeform = not _is_url and not _is_channel
 
-    # ── Free-form Discord-markdown text (no rich embed needed) ────────────────
+    # ── Free-form Discord-markdown text — send as raw message ─────────────────
     if _is_freeform:
-        try:
-            if _custom_img:
-                _fi_embed = discord.Embed(description=_url, color=0x57F287)
-                _fi_embed.set_image(url=_custom_img)
-                await channel.send(embed=_fi_embed)
-            else:
-                await channel.send(_url)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-        return True
+        if _custom_img:
+            # still show the image even for freeform text
+            _fi_embed = discord.Embed(description=_url, color=0x57F287)
+            _fi_embed.set_image(url=_custom_img)
+            await ctx.send(embed=_fi_embed)
+        else:
+            await ctx.send(_url)
+        return
 
-    # ── Build rich server preview embed ───────────────────────────────────────
+    guild = ctx.guild
+    # Build rich server preview embed
     try:
         online = sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot)
     except Exception:
@@ -17222,7 +17243,7 @@ async def _do_send_link(channel: discord.TextChannel, guild: discord.Guild):
     desc_parts = []
     if guild.description:
         desc_parts.append(guild.description)
-    desc_parts.append(f"🟢 **{online}** Online  •  👥 **{total}** Members")
+    desc_parts.append(f"🟢 {online} Online  •  👥 {total} Members")
     desc_parts.append(f"Est. {est}")
     embed = discord.Embed(
         title=guild.name,
@@ -17230,62 +17251,41 @@ async def _do_send_link(channel: discord.TextChannel, guild: discord.Guild):
         color=0x57F287,
     )
     if guild.icon:
-        embed.set_author(name=guild.name, icon_url=guild.icon.url)
-        embed.title = None  # author line acts as the title
+        embed.set_thumbnail(url=guild.icon.url)
 
     # ── Image: custom URL takes priority; fall back to guild banner ───────────
     if _custom_img:
         embed.set_image(url=_custom_img)
     elif guild.banner:
-        try:
-            embed.set_image(url=guild.banner.with_format("png").url)
-        except Exception:
-            pass
+        embed.set_image(url=guild.banner.with_format("png").url)
 
-    # ── Apply alignment ───────────────────────────────────────────────────────
+    # ── apply alignment ───────────────────────────────────────────────────────
     _display_link = f"<#{_url}>" if _is_channel else _url
-    _PAD = "\u3000" * 16
+    _PAD2 = "\u3000" * 16
 
     if _alignment == "center":
-        embed.add_field(
-            name=f"\u3000\u3000\u3000\u3000\u3000 🔗 {_label} \u3000\u3000\u3000\u3000\u3000",
-            value=f"\u3000\u3000\u3000\u3000\u3000 {_display_link} \u3000\u3000\u3000\u3000\u3000",
-            inline=False,
-        )
+        field_name  = f"\u3000\u3000\u3000\u3000\u3000 🔗 {_label} \u3000\u3000\u3000\u3000\u3000"
+        field_value = f"\u3000\u3000\u3000\u3000\u3000 {_display_link} \u3000\u3000\u3000\u3000\u3000"
+        embed.add_field(name=field_name, value=field_value, inline=False)
     elif _alignment == "right":
-        embed.add_field(name=f"{_PAD}🔗 {_label}", value=f"{_PAD}{_display_link}", inline=False)
+        field_name  = f"{_PAD2}🔗 {_label}"
+        field_value = f"{_PAD2}{_display_link}"
+        embed.add_field(name=field_name, value=field_value, inline=False)
     else:
         embed.add_field(name=f"🔗 {_label}", value=_display_link, inline=False)
 
-    try:
-        if _is_channel:
-            await channel.send(embed=embed)
-        else:
-            class _GoView(discord.ui.View):
-                def __init__(self):
-                    super().__init__(timeout=None)
-                    self.add_item(discord.ui.Button(
-                        label=f"👉 {_label}",
-                        url=_url,
-                        style=discord.ButtonStyle.link,
-                    ))
-            await channel.send(embed=embed, view=_GoView())
-    except (discord.Forbidden, discord.HTTPException):
-        pass
-    return True
-
-
-@bot.command(name="link")
-async def link_cmd(ctx):
-    """Show the server link embed. Also triggered by typing `link` without a prefix."""
-    if ctx.guild is None:
-        return await ctx.send("سەروونێ تەنھا لە سێرڤەر | Server only.")
-    # Delete the command message so only the embed is visible
-    try:
-        await ctx.message.delete()
-    except (discord.Forbidden, discord.HTTPException, discord.NotFound):
-        pass
-    await _do_send_link(ctx.channel, ctx.guild)
+    if _is_channel:
+        await ctx.send(embed=embed)
+    else:
+        class _GoView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=None)
+                self.add_item(discord.ui.Button(
+                    label=f"👉 {_label}",
+                    url=_url,
+                    style=discord.ButtonStyle.link,
+                ))
+        await ctx.send(embed=embed, view=_GoView())
 
 
 if not token:
@@ -17945,5 +17945,4 @@ async def autoboostrole_error(ctx, error):
 
 
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
-
-    
+ 
