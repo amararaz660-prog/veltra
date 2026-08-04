@@ -211,12 +211,21 @@ class _PGWrapper:
     def commit(self):
         self._conn.commit()
 
-    def close(self):
+    def rollback(self):
         try:
-            self._conn.commit()
+            self._conn.rollback()
         except Exception:
             pass
-        self._conn.close()
+
+    def close(self):
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
+        try:
+            self._conn.close()
+        except Exception:
+            pass
 
     def __enter__(self):
         return self
@@ -281,6 +290,12 @@ class _SQLiteWrapper:
 
     def commit(self):
         self._conn.commit()
+
+    def rollback(self):
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
 
     def close(self):
         try:
@@ -16987,23 +17002,27 @@ async def autorole_cmd(ctx):
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _get_link_settings(guild_id: int):
-    with get_db() as _conn:
-        # migrate: add columns if missing
-        # On PostgreSQL a failed ALTER puts the connection in ABORT state;
-        # we must rollback before running any further queries.
-        for _col, _default in (("alignment", "'left'"), ("image_url", "''")):
-            try:
-                _conn.execute(f"ALTER TABLE link_settings ADD COLUMN {_col} TEXT DEFAULT {_default}")
-                _conn.commit()
-            except Exception:
+    try:
+        with get_db() as _conn:
+            # Migrate: add columns if missing.
+            # On PostgreSQL a failed ALTER leaves the connection in ABORT state —
+            # rollback() resets it so the SELECT below works normally.
+            for _col, _default in (("alignment", "'left'"), ("image_url", "''")):
                 try:
-                    _conn.rollback()
+                    _conn.execute(
+                        f"ALTER TABLE link_settings ADD COLUMN {_col} TEXT DEFAULT {_default}"
+                    )
+                    _conn.commit()
                 except Exception:
-                    pass
-        row = _conn.execute(
-            "SELECT label, url, alignment, image_url FROM link_settings WHERE guild_id=?", (guild_id,)
-        ).fetchone()
-    return dict(row) if row else None
+                    _conn.rollback()   # _PGWrapper.rollback() now exists
+            row = _conn.execute(
+                "SELECT label, url, alignment, image_url FROM link_settings WHERE guild_id=?",
+                (guild_id,),
+            ).fetchone()
+        return dict(row) if row else None
+    except Exception as _lk_err:
+        logging.warning("_get_link_settings failed for guild %s: %s", guild_id, _lk_err)
+        return None
 
 def _save_link_settings(guild_id: int, label: str, url: str, alignment: str = "left", image_url: str = ""):
     alignment = alignment.strip().lower()
