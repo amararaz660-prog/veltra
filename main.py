@@ -2422,6 +2422,44 @@ def parse_duration(text):
         return None
     return int(m.group(1)) * units[m.group(2)]
 
+
+def _parse_tmo_duration(raw: str):
+    """Parse a timeout duration string into (total_minutes, display_str).
+
+    Accepts:
+      • plain integer          → treated as minutes  (legacy: "30" → 30 m)
+      • number + suffix        → s / m / h / d       ("22h" → 1320 m)
+      • compound               → "1h30m", "2d12h"    (any combo, e.g. "1d6h30m")
+
+    Returns (minutes: int, label: str) or (None, None) on bad input.
+    Max 40 320 minutes (28 days).
+    """
+    raw = raw.strip().lower()
+    # ── plain number → minutes ──────────────────────────────────────────────
+    if raw.isdigit():
+        mins = int(raw)
+        return (mins, f"{mins} minute(s)")
+    # ── compound / single-unit string ───────────────────────────────────────
+    total_secs = 0
+    parts_found = re.findall(r"(\d+)\s*([smhd])", raw)
+    if not parts_found:
+        return (None, None)
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    for val, unit in parts_found:
+        total_secs += int(val) * units[unit]
+    if total_secs < 1:
+        return (None, None)
+    total_mins = max(1, total_secs // 60)
+    # ── build a human-readable label ────────────────────────────────────────
+    label_parts = []
+    remaining = total_secs
+    for unit_name, secs in (("day", 86400), ("hour", 3600), ("minute", 60), ("second", 1)):
+        if remaining >= secs:
+            n = remaining // secs
+            remaining %= secs
+            label_parts.append(f"{n} {unit_name}{'s' if n != 1 else ''}")
+    return (total_mins, ", ".join(label_parts))
+
 # --- INITIALIZE DATA ---
 load_xp()
 load_warnings()
@@ -3233,31 +3271,8 @@ async def on_message(message):
                     pass
         return
 
-    # --- NO-PREFIX TAG TRIGGER ---
-    # Triggers on:  <tagname>          (just the name alone)
-    #           or: tag <tagname>      (legacy prefix form)
-    if message.guild is not None:
-        _raw_msg = message.content.strip()
-        _raw_lower = _raw_msg.lower()
-        # Resolve the tag name: strip "tag " prefix if present, else use the
-        # whole message as the tag name (so typing "tag2" fires tag "tag2").
-        if _raw_lower.startswith("tag "):
-            _tname = _raw_msg[4:].strip().lower()
-        else:
-            _tname = _raw_lower
-        _tentry = tags_data.get(str(message.guild.id), {}).get(_tname)
-        if _tentry:
-            try:
-                await message.delete()
-            except (discord.Forbidden, discord.HTTPException, discord.NotFound):
-                pass
-            try:
-                await message.channel.send(_tentry["response"])
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            return
-
     # --- NO-PREFIX LINK TRIGGER ---
+    # Must run BEFORE the tag trigger so a tag named "link" cannot shadow it.
     if message.guild is not None and message.content.strip().lower() == "link":
         _lk_link_row = _get_link_settings(message.guild.id)
         if _lk_link_row:
@@ -3334,6 +3349,31 @@ async def on_message(message):
             except (discord.Forbidden, discord.HTTPException, ValueError):
                 pass
         return
+
+    # --- NO-PREFIX TAG TRIGGER ---
+    # Triggers on:  <tagname>          (just the name alone)
+    #           or: tag <tagname>      (legacy prefix form)
+    # NOTE: runs AFTER the link trigger so "link" is never shadowed by a tag.
+    if message.guild is not None:
+        _raw_msg = message.content.strip()
+        _raw_lower = _raw_msg.lower()
+        if _raw_lower.startswith("tag "):
+            _tname = _raw_msg[4:].strip().lower()
+        else:
+            _tname = _raw_lower
+        # Never let a tag shadow built-in no-prefix triggers
+        if _tname not in ("link", "reklam"):
+            _tentry = tags_data.get(str(message.guild.id), {}).get(_tname)
+            if _tentry:
+                try:
+                    await message.delete()
+                except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                    pass
+                try:
+                    await message.channel.send(_tentry["response"])
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                return
 
     # --- GCREATE INTERACTIVE SESSION ---
     if message.guild is not None and not message.author.bot and not message.content.startswith(bot.command_prefix):
@@ -3475,24 +3515,35 @@ async def on_message(message):
                     name="Usage",
                     value=(
                         "`tmo @member`\n"
-                        "`tmo @member [minutes]`\n"
-                        "`tmo @member [minutes] [reason]`\n\n"
-                        "`!timeout @member [minutes] [reason]`\n"
-                        "`!tmo @member [minutes] [reason]`"
+                        "`tmo @member [duration]`\n"
+                        "`tmo @member [duration] [reason]`\n\n"
+                        "`!tmo @member [duration] [reason]`\n"
+                        "`!timeout @member [duration] [reason]`"
+                    ),
+                    inline=False,
+                )
+                _e.add_field(
+                    name="Duration formats",
+                    value=(
+                        "`30m` → 30 minutes\n"
+                        "`2h` → 2 hours\n"
+                        "`1d` → 1 day\n"
+                        "`1h30m` → 1 hour 30 minutes\n"
+                        "`90` → 90 minutes (plain number = minutes)"
                     ),
                     inline=False,
                 )
                 _e.add_field(
                     name="Examples",
                     value=(
-                        "`tmo @B50`\n"
-                        "`tmo @B50 30`\n"
-                        "`tmo @B50 60 Spamming`\n"
-                        "`!tmo @B50 10 Breaking rules`"
+                        "`tmo @B50 30m`\n"
+                        "`tmo @B50 2h Spamming`\n"
+                        "`tmo @B50 1d Breaking rules`\n"
+                        "`!tmo @B50 12h Repeated violations`"
                     ),
                     inline=False,
                 )
-                _e.set_footer(text="Default duration: 10 minutes  •  Max: 28 days (40320 min)")
+                _e.set_footer(text="Default: 10 minutes  •  Max: 28 days  •  Plain number = minutes")
                 await message.channel.send(embed=_e)
                 return
 
@@ -3503,22 +3554,33 @@ async def on_message(message):
             _parts = _np.split(None, 3)
             _tmo_member  = _resolve_member(_parts[1]) if len(_parts) >= 2 else None
             _tmo_minutes = 10
+            _tmo_label   = "10 minutes"
             _tmo_reason  = "No reason provided"
             if _tmo_member is None:
                 _e2 = discord.Embed(
-                    description="❌ Member not found — mention or ID required.\n`tmo @member [minutes] [reason]`",
+                    description=(
+                        "❌ Member not found — mention or ID required.\n"
+                        "`tmo @member [duration] [reason]`\n"
+                        "Duration examples: `30m` `2h` `1d` `1h30m` `90` (= 90 min)"
+                    ),
                     color=0xE74C3C,
                 )
                 await message.channel.send(embed=_e2)
                 return
-            if len(_parts) >= 3 and _parts[2].isdigit():
-                _tmo_minutes = int(_parts[2])
-                if len(_parts) >= 4:
-                    _tmo_reason = _parts[3]
-            elif len(_parts) >= 3:
-                _tmo_reason = " ".join(_parts[2:])
+            if len(_parts) >= 3:
+                _dur_raw = _parts[2]
+                _parsed_mins, _parsed_label = _parse_tmo_duration(_dur_raw)
+                if _parsed_mins is not None:
+                    # valid duration token
+                    _tmo_minutes = _parsed_mins
+                    _tmo_label   = _parsed_label
+                    if len(_parts) >= 4:
+                        _tmo_reason = _parts[3]
+                else:
+                    # not a duration — treat entire remainder as reason
+                    _tmo_reason = " ".join(_parts[2:])
             if _tmo_minutes < 1 or _tmo_minutes > 40320:
-                await message.channel.send("❌ Duration must be 1–40320 minutes (28 days).")
+                await message.channel.send("❌ Duration must be between 1 minute and 28 days (40320 min).")
                 return
             # ── Role hierarchy check ────────────────────────────────────────────
             if message.author != message.guild.owner:
@@ -3534,9 +3596,9 @@ async def on_message(message):
                     title="🔇 Member Timed Out",
                     color=0xE67E22,
                 )
-                _ok.add_field(name="👤 Member", value=_tmo_member.mention, inline=True)
-                _ok.add_field(name="⏱️ Duration", value=f"**{_tmo_minutes}** minute(s)", inline=True)
-                _ok.add_field(name="📋 Reason", value=_tmo_reason, inline=False)
+                _ok.add_field(name="👤 Member",   value=_tmo_member.mention, inline=True)
+                _ok.add_field(name="⏱️ Duration", value=f"**{_tmo_label}**",  inline=True)
+                _ok.add_field(name="📋 Reason",   value=_tmo_reason,          inline=False)
                 _ok.set_thumbnail(url=_tmo_member.display_avatar.url)
                 _ok.set_footer(text=f"Timed out by {message.author}", icon_url=message.author.display_avatar.url)
                 _ok.timestamp = discord.utils.utcnow()
@@ -7448,7 +7510,7 @@ async def unban_error(ctx, error):
 
 @bot.command()
 @commands.has_permissions(moderate_members=True)
-async def mute(ctx, member: discord.Member, minutes: int = 10, *, reason: str = "No reason provided | هیچ هۆکارێک نەدراوە"):
+async def mute(ctx, member: discord.Member, minutes: int = 10, *, label: str = "", reason: str = "No reason provided | هیچ هۆکارێک نەدراوە"):
     if minutes < 1 or minutes > 40320:
         await ctx.send("❌ Duration must be between 1 minute and 28 days (40320 minutes).")
         return
@@ -7460,6 +7522,7 @@ async def mute(ctx, member: discord.Member, minutes: int = 10, *, reason: str = 
                 "ناتوانیت کەسێک بێدەنگ بکەیت کە رۆڵێکی یەکسان یان بەرزتر لە رۆڵی خۆت هەیە."
             )
             return
+    duration_display = label if label else f"{minutes} minute(s)"
     until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes)
     try:
         await member.timeout(until, reason=reason)
@@ -7468,10 +7531,10 @@ async def mute(ctx, member: discord.Member, minutes: int = 10, *, reason: str = 
             color=0xE67E22,
             timestamp=datetime.datetime.utcnow(),
         )
-        embed_mute.add_field(name="👤 Member", value=f"{member.mention} (`{member.id}`)", inline=False)
-        embed_mute.add_field(name="⏱️ Duration", value=f"**{minutes}** minute(s)", inline=True)
-        embed_mute.add_field(name="📋 Reason", value=reason, inline=True)
-        embed_mute.add_field(name="👮 Moderator", value=ctx.author.mention, inline=False)
+        embed_mute.add_field(name="👤 Member",   value=f"{member.mention} (`{member.id}`)", inline=False)
+        embed_mute.add_field(name="⏱️ Duration", value=f"**{duration_display}**",           inline=True)
+        embed_mute.add_field(name="📋 Reason",   value=reason,                               inline=True)
+        embed_mute.add_field(name="👮 Moderator", value=ctx.author.mention,                  inline=False)
         embed_mute.set_thumbnail(url=member.display_avatar.url)
         embed_mute.set_footer(text=f"Timed out by {ctx.author}", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed_mute)
@@ -7632,8 +7695,15 @@ async def nickname_error(ctx, error):
 
 @bot.command(name="timeout", aliases=["tmo"])
 @commands.has_permissions(moderate_members=True)
-async def timeout_cmd(ctx, member: discord.Member, minutes: int = 10, *, reason: str = "No reason provided"):
-    await mute(ctx, member, minutes, reason=reason)
+async def timeout_cmd(ctx, member: discord.Member, duration: str = "10m", *, reason: str = "No reason provided"):
+    mins, label = _parse_tmo_duration(duration)
+    if mins is None:
+        await ctx.send(
+            "❌ Invalid duration. Examples: `30m` `2h` `1d` `1h30m` `90` (= 90 min)\n"
+            "Usage: `!tmo @member [duration] [reason]`"
+        )
+        return
+    await mute(ctx, member, mins, label=label, reason=reason)
 
 @timeout_cmd.error
 async def timeout_cmd_error(ctx, error):
@@ -7642,7 +7712,7 @@ async def timeout_cmd_error(ctx, error):
     elif isinstance(error, commands.MemberNotFound):
         await ctx.send("❌ Member not found.")
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("Usage: `!timeout @member [minutes] [reason]`")
+        await ctx.send("Usage: `!tmo @member [duration] [reason]`  e.g. `!tmo @B50 2h Spamming`")
 
 @bot.command(name="createchannel", aliases=["addchannel"])
 @commands.has_permissions(manage_channels=True)
