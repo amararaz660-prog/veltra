@@ -3287,82 +3287,48 @@ async def on_message(message):
         return
 
     # --- NO-PREFIX LINK TRIGGER ---
-    # Must run BEFORE the tag trigger so a tag named "link" cannot shadow it.
+    # Type "link" (no prefix needed) to show the configured server link.
     if message.guild is not None and message.content.strip().lower() == "link":
-        _lk_link_row = _get_link_settings(message.guild.id)
-        if _lk_link_row:
-            _lk_url        = (_lk_link_row.get("url") or "").strip()
-            _lk_label      = (_lk_link_row.get("label") or "Go to Server").strip()
-            _lk_custom_img = (_lk_link_row.get("image_url") or "").strip()
-            _lk_is_url     = _lk_url.startswith(("http://", "https://"))
-            _lk_is_channel = _lk_url.isdigit()
-
-            # Nothing configured yet — silently ignore
+        try:
+            _lk_row = _get_link_settings(message.guild.id)
+            if not _lk_row:
+                return
+            _lk_url   = (_lk_row.get("url") or "").strip()
+            _lk_label = (_lk_row.get("label") or "Go to Server").strip() or "Go to Server"
             if not _lk_url:
                 return
 
-            try:
-                guild = message.guild
+            # Always ensure the URL has a scheme so Discord accepts it as a button URL
+            if not _lk_url.startswith(("http://", "https://")) and not _lk_url.isdigit():
+                _lk_url = "https://" + _lk_url
 
-                # ── Server info lines ──────────────────────────────────────────
-                try:
-                    _lk_online = sum(
-                        1 for m in guild.members
-                        if m.status != discord.Status.offline and not m.bot
-                    )
-                except Exception:
-                    _lk_online = 0
-                _lk_total = guild.member_count or 0
-                _lk_est   = guild.created_at.strftime("%B %Y")
+            guild = message.guild
 
-                _lk_desc_parts = []
-                if guild.description:
-                    _lk_desc_parts.append(guild.description)
-                _lk_desc_parts.append(
-                    f"🟢 **{_lk_online}** Online  •  👥 **{_lk_total}** Members"
-                )
-                _lk_desc_parts.append(f"Est. {_lk_est}")
+            # Build a clean embed — server name + member count
+            _lk_embed = discord.Embed(color=0x57F287)
+            if guild.icon:
+                _lk_embed.set_author(name=guild.name, icon_url=guild.icon.url)
+            else:
+                _lk_embed.set_author(name=guild.name)
+            _lk_embed.description = f"👥 **{guild.member_count or 0}** Members"
 
-                # ── Build embed: server icon · title · info → image (if set) → button ──
-                _lk_embed = discord.Embed(
-                    description="\n".join(_lk_desc_parts),
-                    color=0x57F287,
-                )
-
-                # Author line: server icon + server name
-                if guild.icon:
-                    _lk_embed.set_author(name=guild.name, icon_url=guild.icon.url)
-                else:
-                    _lk_embed.set_author(name=guild.name)
-
-                # Only show image when one has been explicitly set — no fallback
-                if _lk_custom_img:
-                    _lk_embed.set_image(url=_lk_custom_img)
-
-                # ── Send ───────────────────────────────────────────────────────
-                if _lk_is_channel:
-                    # Channel link — show mention, no button needed
-                    _lk_embed.add_field(
-                        name="\u200b",
-                        value=f"<#{_lk_url}>",
-                        inline=False,
-                    )
-                    await message.channel.send(embed=_lk_embed)
-                else:
-                    # External invite URL — "Go to Server" button below embed
-                    _lk_btn_label = _lk_label[:80] if _lk_label else "Go to Server"
-                    class _LkGoView(discord.ui.View):
-                        def __init__(self):
-                            super().__init__(timeout=None)
-                            self.add_item(discord.ui.Button(
-                                label=_lk_btn_label,
-                                url=_lk_url,
-                                style=discord.ButtonStyle.link,
-                            ))
-                    await message.channel.send(embed=_lk_embed, view=_LkGoView())
-
-            except (discord.Forbidden, discord.HTTPException, ValueError):
-                pass
+            # Channel ID → show as mention
+            if _lk_url.isdigit():
+                _lk_embed.add_field(name="\u200b", value=f"<#{_lk_url}>", inline=False)
+                await message.channel.send(embed=_lk_embed)
+            else:
+                # URL → clickable button (no image button, no extra complexity)
+                _lk_view = discord.ui.View(timeout=None)
+                _lk_view.add_item(discord.ui.Button(
+                    label=_lk_label[:80],
+                    url=_lk_url,
+                    style=discord.ButtonStyle.link,
+                ))
+                await message.channel.send(embed=_lk_embed, view=_lk_view)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        except Exception as _lk_err:
+            logging.warning("link trigger error: %s", _lk_err)
         return
 
     # --- NO-PREFIX TAG TRIGGER ---
