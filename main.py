@@ -3261,11 +3261,15 @@ async def on_message(message):
     if message.guild is not None and message.content.strip().lower() == "link":
         _lk_link_row = _get_link_settings(message.guild.id)
         if _lk_link_row:
-            _lk_url        = _lk_link_row.get("url") or ""
-            _lk_label      = _lk_link_row.get("label") or "Go to Server"
+            _lk_url        = (_lk_link_row.get("url") or "").strip()
+            _lk_label      = (_lk_link_row.get("label") or "Go to Server").strip()
             _lk_custom_img = (_lk_link_row.get("image_url") or "").strip()
             _lk_is_url     = _lk_url.startswith(("http://", "https://"))
             _lk_is_channel = _lk_url.isdigit()
+
+            # Nothing configured yet — silently ignore
+            if not _lk_url:
+                return
 
             try:
                 guild = message.guild
@@ -3289,30 +3293,25 @@ async def on_message(message):
                 )
                 _lk_desc_parts.append(f"Est. {_lk_est}")
 
-                # ── Build embed: title → description → image → button ─────────
+                # ── Build embed: server icon · title · info → image (if set) → button ──
                 _lk_embed = discord.Embed(
-                    title=guild.name,
                     description="\n".join(_lk_desc_parts),
                     color=0x57F287,
                 )
 
-                # Small server icon on the left of the title
+                # Author line: server icon + server name
                 if guild.icon:
-                    _lk_embed.set_author(
-                        name=guild.name,
-                        icon_url=guild.icon.url,
-                    )
-                    _lk_embed.title = None  # author line replaces title
+                    _lk_embed.set_author(name=guild.name, icon_url=guild.icon.url)
+                else:
+                    _lk_embed.set_author(name=guild.name)
 
-                # Large image below the description text
+                # Only show image when one has been explicitly set — no fallback
                 if _lk_custom_img:
                     _lk_embed.set_image(url=_lk_custom_img)
-                elif guild.banner:
-                    _lk_embed.set_image(url=guild.banner.with_format("png").url)
 
                 # ── Send ───────────────────────────────────────────────────────
                 if _lk_is_channel:
-                    # Channel mention — no external button needed
+                    # Channel link — show mention, no button needed
                     _lk_embed.add_field(
                         name="\u200b",
                         value=f"<#{_lk_url}>",
@@ -3320,18 +3319,19 @@ async def on_message(message):
                     )
                     await message.channel.send(embed=_lk_embed)
                 else:
-                    # External URL — "Go to Server" link button below the embed
+                    # External invite URL — "Go to Server" button below embed
+                    _lk_btn_label = _lk_label[:80] if _lk_label else "Go to Server"
                     class _LkGoView(discord.ui.View):
                         def __init__(self):
                             super().__init__(timeout=None)
                             self.add_item(discord.ui.Button(
-                                label=_lk_label,
+                                label=_lk_btn_label,
                                 url=_lk_url,
                                 style=discord.ButtonStyle.link,
                             ))
                     await message.channel.send(embed=_lk_embed, view=_LkGoView())
 
-            except (discord.Forbidden, discord.HTTPException):
+            except (discord.Forbidden, discord.HTTPException, ValueError):
                 pass
         return
 
@@ -12717,19 +12717,19 @@ def _build_giveaway_embed(
 ) -> discord.Embed:
     if ended:
         embed = discord.Embed(
-            title="GIVEAWAY ENDED 💝",
+            title="GIVEAWAY ENDED 🎁",
             color=0xED4245,
             timestamp=datetime.datetime.utcnow(),
         )
         embed.add_field(name="🎁 Prize", value=f"**{prize}**", inline=True)
         embed.add_field(
-            name="🕐 Ended",
+            name="⏰ Ended",
             value=end_time.strftime("%m/%d/%Y, %I:%M:%S %p"),
             inline=True,
         )
         embed.add_field(name="🏠 Hosted By", value=host.mention, inline=False)
         if winners:
-            winner_str = " ".join(f"{w.mention} ({w.id})" for w in winners)
+            winner_str = " ".join(w.mention for w in winners)
             embed.add_field(name="🏆 Winners", value=winner_str, inline=False)
         else:
             embed.add_field(name="🏆 Winners", value="No valid entries — no winner.", inline=False)
