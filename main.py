@@ -17173,22 +17173,6 @@ class LinkSetupView(discord.ui.View):
                 await interaction.followup.send(f"❌ هەڵە | Error: {e}", ephemeral=True)
 
     @discord.ui.button(
-        label="🖼️ دانانی وێنە | Set Image",
-        style=discord.ButtonStyle.secondary,
-        row=0,
-    )
-    async def btn_set_image(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not (interaction.user.guild_permissions.manage_guild or interaction.user == interaction.guild.owner):
-            return await interaction.response.send_message("❌ مووچەی Manage Server پێویستە. | You need Manage Server permission.", ephemeral=True)
-        try:
-            await interaction.response.send_modal(LinkImageModal(self.guild_id, self))
-        except Exception as e:
-            try:
-                await interaction.response.send_message(f"❌ هەڵە | Error: {e}", ephemeral=True)
-            except Exception:
-                await interaction.followup.send(f"❌ هەڵە | Error: {e}", ephemeral=True)
-
-    @discord.ui.button(
         label="🔗 سەیرکردنی لینکی ئێستا | View Current Link",
         style=discord.ButtonStyle.secondary,
         row=1,
@@ -17204,25 +17188,6 @@ class LinkSetupView(discord.ui.View):
             _vurl = link['url']
             _vcontent = f"<#{_vurl}>" if (_vurl or "").isdigit() else (_vurl or "❌ not set")
             await interaction.response.send_message(_vcontent, ephemeral=True)
-
-    @discord.ui.button(
-        label="🗑️ سڕینەوەی وێنە | Remove Image",
-        style=discord.ButtonStyle.secondary,
-        row=1,
-    )
-    async def btn_remove_image(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not (interaction.user.guild_permissions.manage_guild or interaction.user == interaction.guild.owner):
-            return await interaction.response.send_message("❌ مووچەی Manage Server پێویستە. | You need Manage Server permission.", ephemeral=True)
-        link = _get_link_settings(self.guild_id)
-        if not link or not link.get("image_url"):
-            return await interaction.response.send_message(
-                "❌ هیچ وێنەیەک دانەنراوە. | No image is set.", ephemeral=True
-            )
-        _save_link_image(self.guild_id, "")
-        link = _get_link_settings(self.guild_id)
-        new_embed = _build_link_panel_embed(interaction.guild, link)
-        await interaction.response.edit_message(embed=new_embed, view=self)
-        await interaction.followup.send("✅ وێنەکە سڕدرایەوە. | Image removed.", ephemeral=True)
 
     @discord.ui.button(
         label="🗑️ سڕینەوەی لینک | Remove Link",
